@@ -113,7 +113,11 @@ class YoloSegmenter:
         self.device = device
         # FP16 halves memory traffic on tensor cores and is safe for inference; it is not
         # used on CPU, where it is slower and unsupported for many ops.
+        # NOTE: ultralytics removed the `half=` predict argument in 8.4; it is silently
+        # ignored now, and precision is selected via `quantize`. Passing `half` would look
+        # correct while quietly running FP32 on the GPU.
         self.half = (device == "cuda") if half is None else half
+        self.quantize = "fp16" if self.half else "fp32"
 
         if device == "cuda":
             try:
@@ -131,7 +135,7 @@ class YoloSegmenter:
                 source=_np.zeros((self.imgsz, self.imgsz, 3), dtype=_np.uint8),
                 verbose=False,
                 device=self.device,
-                half=self.half,
+                quantize=self.quantize,
             )
             self.warmup_ok = True
         except Exception:  # pragma: no cover
@@ -152,7 +156,7 @@ class YoloSegmenter:
                 verbose=False,
                 retina_masks=True,
                 device=self.device,
-                half=self.half,
+                quantize=self.quantize,
             )[0]
         except Exception as exc:  # keep monitoring alive if one frame fails
             return LiveSegmentation(

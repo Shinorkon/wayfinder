@@ -96,7 +96,7 @@ def main() -> int:
         if args.allow_missing_analysis:
             warn("data/analysis/index.json missing (allowed by flag)")
         else:
-            check(False, "analysis index present", "run: python3 scripts/analyze_footage.py --skip-sam3")
+            check(False, "analysis index present", "run: python3 scripts/analyze_footage.py")
             return 1
     else:
         coverage = index.get("coverage", {})

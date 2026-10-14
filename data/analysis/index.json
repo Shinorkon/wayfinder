@@ -1,6 +1,6 @@
 {
   "network": "RTL Greater Mal\u00e9 Bus Network",
-  "generated_at": "2026-10-14T17:04:58Z",
+  "generated_at": "2026-10-14T17:20:08Z",
   "generator": "scripts/analyze_footage.py",
   "coverage": {
     "stops_total": 13,
@@ -28,7 +28,7 @@
         "analysed_span_s": 14.8,
         "frames_analysed": 74,
         "sample_stride": 5,
-        "compute_seconds": 8.35,
+        "compute_seconds": 2.64,
         "parameters": {
           "conf_thresh": 0.3,
           "imgsz": 640,
@@ -440,7 +440,7 @@
         "analysed_span_s": 35.0,
         "frames_analysed": 210,
         "sample_stride": 5,
-        "compute_seconds": 19.55,
+        "compute_seconds": 7.59,
         "parameters": {
           "conf_thresh": 0.3,
           "imgsz": 640,
@@ -1205,7 +1205,7 @@
         "analysed_span_s": 17.2,
         "frames_analysed": 86,
         "sample_stride": 5,
-        "compute_seconds": 3.61,
+        "compute_seconds": 2.89,
         "parameters": {
           "conf_thresh": 0.3,
           "imgsz": 640,
@@ -1697,7 +1697,7 @@
         "analysed_span_s": 111.4,
         "frames_analysed": 557,
         "sample_stride": 5,
-        "compute_seconds": 57.46,
+        "compute_seconds": 22.36,
         "parameters": {
           "conf_thresh": 0.3,
           "imgsz": 640,
@@ -2515,7 +2515,7 @@
         "analysed_span_s": 96.2,
         "frames_analysed": 481,
         "sample_stride": 5,
-        "compute_seconds": 49.92,
+        "compute_seconds": 26.21,
         "parameters": {
           "conf_thresh": 0.3,
           "imgsz": 640,
@@ -9494,5 +9494,87 @@
         "used_low_confidence_fallback": false
       }
     }
-  ]
+  ],
+  "keyframes": {
+    "01_bus_stop_people_pexels_1601542_1080p.mp4": {
+      "images": {
+        "raw": "01_bus_stop_people_pexels_1601542_1080p/raw.jpg",
+        "detections": "01_bus_stop_people_pexels_1601542_1080p/detections.jpg",
+        "segmentation": "01_bus_stop_people_pexels_1601542_1080p/segmentation.jpg",
+        "hybrid": "01_bus_stop_people_pexels_1601542_1080p/hybrid.jpg"
+      },
+      "timestamp_s": 0.0,
+      "detections_in_frame": 7,
+      "segmentation": {
+        "available": true,
+        "masks": 7,
+        "presence_score": null,
+        "used_low_confidence_fallback": false
+      }
+    },
+    "02_cctv_elevated_street_night_MOT17-04_540p.mp4": {
+      "images": {
+        "raw": "02_cctv_elevated_street_night_MOT17-04_540p/raw.jpg",
+        "detections": "02_cctv_elevated_street_night_MOT17-04_540p/detections.jpg",
+        "segmentation": "02_cctv_elevated_street_night_MOT17-04_540p/segmentation.jpg",
+        "hybrid": "02_cctv_elevated_street_night_MOT17-04_540p/hybrid.jpg"
+      },
+      "timestamp_s": 0.0,
+      "detections_in_frame": 21,
+      "segmentation": {
+        "available": true,
+        "masks": 18,
+        "presence_score": null,
+        "used_low_confidence_fallback": false
+      }
+    },
+    "03_cctv_station_concourse_MOT20-01_540p.mp4": {
+      "images": {
+        "raw": "03_cctv_station_concourse_MOT20-01_540p/raw.jpg",
+        "detections": "03_cctv_station_concourse_MOT20-01_540p/detections.jpg",
+        "segmentation": "03_cctv_station_concourse_MOT20-01_540p/segmentation.jpg",
+        "hybrid": "03_cctv_station_concourse_MOT20-01_540p/hybrid.jpg"
+      },
+      "timestamp_s": 0.0,
+      "detections_in_frame": 16,
+      "segmentation": {
+        "available": true,
+        "masks": 14,
+        "presence_score": null,
+        "used_low_confidence_fallback": false
+      }
+    },
+    "04_cctv_station_concourse_MOT20-02_540p.mp4": {
+      "images": {
+        "raw": "04_cctv_station_concourse_MOT20-02_540p/raw.jpg",
+        "detections": "04_cctv_station_concourse_MOT20-02_540p/detections.jpg",
+        "segmentation": "04_cctv_station_concourse_MOT20-02_540p/segmentation.jpg",
+        "hybrid": "04_cctv_station_concourse_MOT20-02_540p/hybrid.jpg"
+      },
+      "timestamp_s": 0.0,
+      "detections_in_frame": 23,
+      "segmentation": {
+        "available": true,
+        "masks": 20,
+        "presence_score": null,
+        "used_low_confidence_fallback": false
+      }
+    },
+    "05_cctv_outdoor_plaza_crowd_MOT20-03_440p.mp4": {
+      "images": {
+        "raw": "05_cctv_outdoor_plaza_crowd_MOT20-03_440p/raw.jpg",
+        "detections": "05_cctv_outdoor_plaza_crowd_MOT20-03_440p/detections.jpg",
+        "segmentation": "05_cctv_outdoor_plaza_crowd_MOT20-03_440p/segmentation.jpg",
+        "hybrid": "05_cctv_outdoor_plaza_crowd_MOT20-03_440p/hybrid.jpg"
+      },
+      "timestamp_s": 0.0,
+      "detections_in_frame": 44,
+      "segmentation": {
+        "available": true,
+        "masks": 41,
+        "presence_score": null,
+        "used_low_confidence_fallback": false
+      }
+    }
+  }
 }

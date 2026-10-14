@@ -171,3 +171,27 @@ def test_segmenter_honours_an_explicit_device():
     assert model.device == "cpu"
     assert model.half is False
     assert model.warmup_ok is True
+
+
+def test_precision_uses_the_current_api():
+    """
+    ultralytics 8.4 removed the `half=` predict argument. Passing it looked correct but
+    silently ran FP32, so the code must use `quantize` and the two must agree.
+    """
+    cpu = YoloSegmenter(device="cpu", half=False)
+    assert cpu.quantize == "fp32"
+    assert cpu.half is False
+
+    # Ask for half precision without a GPU present; the flag must drive the argument.
+    requested = YoloSegmenter(device="cpu", half=True)
+    assert requested.quantize == "fp16"
+
+
+def test_no_deprecated_predict_arguments_are_used():
+    import inspect
+
+    from src.cv import segmenter as module
+
+    source = inspect.getsource(module.YoloSegmenter.segment)
+    assert "half=" not in source, "half= is deprecated and ignored; use quantize="
+    assert "quantize=" in source

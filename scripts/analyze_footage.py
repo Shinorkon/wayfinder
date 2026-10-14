@@ -12,7 +12,7 @@ These artifacts are the sole source of arrival-rate numbers in the dashboard. Ru
 whenever footage changes:
 
     python3 scripts/analyze_footage.py                 # everything, including SAM 3
-    python3 scripts/analyze_footage.py --skip-sam3     # faster, no segmentation renders
+    python3 scripts/analyze_footage.py --skip-segmentation   # boxes only, no mask layer
     python3 scripts/analyze_footage.py --only 01       # one clip by filename prefix
 """
 
@@ -132,7 +132,10 @@ def main() -> int:
         "--sam3-deep-pass", action="store_true",
         help="render the mask layer with SAM 3 instead of YOLOv8-seg (much slower)",
     )
-    ap.add_argument("--only", default=None, help="only clips whose filename starts with this")
+    ap.add_argument(
+        "--only", default=None,
+        help="re-analyse only clips whose filename starts with this, merging into the existing index",
+    )
     ap.add_argument("--max-seconds", type=float, default=None, help="override analysis window")
     args = ap.parse_args()
 
@@ -191,11 +194,49 @@ def main() -> int:
             analysis=art,
             source_meta=sources["clips"],
         )
-        keyframes[name] = kf
+        keyframes[name] = {
+            "images": kf["images"],
+            "timestamp_s": kf["timestamp_s"],
+            "detections_in_frame": kf["detections_in_frame"],
+            "segmentation": kf["segmentation"],
+        }
         print(f"    rendered {len(kf['images'])} layers in {time.time() - t0:.1f}s")
 
-    index = build_index(clip_artifacts, keyframes, network)
+    # Merge into any existing index rather than replacing it. A partial run
+    # (`--only`) must not drop the analyses for clips it did not touch: that silently
+    # turns most stops into "no data" and destroys committed evidence.
     index_path = os.path.join(ANALYSIS_DIR, "index.json")
+    merged_artifacts: Dict[str, Dict[str, Any]] = {}
+    merged_keyframes: Dict[str, Dict[str, Any]] = {}
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, "r", encoding="utf-8") as f:
+                previous = json.load(f)
+            merged_artifacts.update(previous.get("clips", {}))
+            if previous.get("keyframes"):
+                merged_keyframes.update(previous["keyframes"])
+            else:
+                # Older indexes did not store the keyframe manifest separately; rebuild
+                # it from the per-stop rows so partial runs stay consistent.
+                for row in previous.get("stops", []):
+                    clip = row.get("video_filename")
+                    if clip and row.get("keyframes"):
+                        merged_keyframes[clip] = {
+                            "images": {
+                                layer: url.replace("/output/keyframes/", "")
+                                for layer, url in row["keyframes"].items()
+                            },
+                            "timestamp_s": row.get("keyframe_timestamp_s"),
+                            "detections_in_frame": row.get("detections_in_keyframe"),
+                            "segmentation": row.get("segmentation", {"available": False}),
+                        }
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"warning: could not read the existing index ({exc}); writing a fresh one")
+
+    merged_artifacts.update(clip_artifacts)
+    merged_keyframes.update(keyframes)
+    index = build_index(merged_artifacts, merged_keyframes, network)
+    index["keyframes"] = merged_keyframes
     with open(index_path, "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2)
 
