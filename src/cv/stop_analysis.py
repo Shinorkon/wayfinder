@@ -272,6 +272,11 @@ def _zone_from_tracks(
             "tracks_inside_frac": round(inside / max(1, len(tracks)), 3),
             "fits_area_bounds": fits,
             "bounds_frac": bounds,
+            # The raster itself, so the live monitor can reuse the exact zone that the
+            # offline measurement used instead of deriving a slightly different one.
+            "mask_rows": [
+                "".join("1" if v else "0" for v in row) for row in zone_mask.astype(int)
+            ],
             "notes": (
                 "auto-derived; validate against the rendered keyframe"
                 if fits
@@ -280,6 +285,149 @@ def _zone_from_tracks(
         }
     )
     return zone_meta, zone_mask
+
+
+def assess_zone(
+    zone_mask: Optional[np.ndarray],
+    tracks: Sequence[Track],
+    params: Dict[str, Any],
+    fps: float,
+    frame_w: int,
+    frame_h: int,
+    stride: int = 1,
+) -> List[Dict[str, Any]]:
+    """
+    Classifies tracks against an existing waiting-zone mask.
+
+    Shared by the offline analysis and the live monitor, so "who is waiting" means
+    exactly the same thing in both. Returns one record per track.
+    """
+    enter_thr = float(params["stationary_enter_norm"])
+    exit_thr = float(params["stationary_exit_norm"])
+    window = int(params["speed_window_frames"])
+    smooth = int(params.get("smooth_centers", 3))
+
+    records: List[Dict[str, Any]] = []
+    for tr in tracks:
+        speeds, states, inside, aligned = _dwell_analysis(
+            tr.history,
+            fps=fps,
+            stride=stride,
+            window=window,
+            smooth=smooth,
+            enter_thr=enter_thr,
+            exit_thr=exit_thr,
+            zone_mask=zone_mask,
+            frame_w=frame_w,
+            frame_h=frame_h,
+        )
+        in_zone_count = sum(1 for v in inside if v)
+
+        longest = 0.0
+        run_start: Optional[float] = None
+        prev_inside_t: Optional[float] = None
+        in_zone_seconds = 0.0
+        for (obs, is_stat), is_in in zip(aligned, inside):
+            t = obs * stride / fps
+            if is_in and prev_inside_t is not None:
+                in_zone_seconds += t - prev_inside_t
+            prev_inside_t = t if is_in else None
+            if is_stat:
+                if run_start is None:
+                    run_start = t
+                longest = max(longest, t - run_start)
+            else:
+                run_start = None
+
+        records.append(
+            {
+                "track_id": tr.track_id,
+                "box": tr.box,
+                "in_zone": in_zone_count > 0,
+                "in_zone_observations": in_zone_count,
+                "mean_speed_norm": round(float(np.mean(speeds)) if speeds else 0.0, 4),
+                "dwell_in_zone_s": round(in_zone_seconds, 2),
+                "longest_stationary_run_s": round(longest, 2),
+                "is_waiting": in_zone_count >= int(params["stationary_min_observations"])
+                and longest >= float(params["min_dwell_s"]),
+            }
+        )
+    return records
+
+
+def zone_bounds(zone_mask: Optional[np.ndarray]) -> Optional[Dict[str, float]]:
+    """Normalised bounding box of a zone raster, for drawing it on a frame."""
+    if zone_mask is None or not zone_mask.any():
+        return None
+    grid = zone_mask.shape[0]
+    ys, xs = np.where(zone_mask)
+    return {
+        "x1_frac": float(xs.min() / grid),
+        "y1_frac": float(ys.min() / grid),
+        "x2_frac": float((xs.max() + 1) / grid),
+        "y2_frac": float((ys.max() + 1) / grid),
+    }
+
+
+def zone_mask_from_rows(rows: Optional[Sequence[str]]) -> Optional[np.ndarray]:
+    """Rebuilds a zone raster from the compact string form stored in the artifacts."""
+    if not rows:
+        return None
+    grid = len(rows)
+    mask = np.zeros((grid, grid), dtype=bool)
+    for y, row in enumerate(rows):
+        for x, char in enumerate(row[:grid]):
+            mask[y, x] = char == "1"
+    return mask if mask.any() else None
+
+
+def summarise_live(
+    records: Sequence[Dict[str, Any]],
+    zone_mask: Optional[np.ndarray],
+    frame_w: int,
+    frame_h: int,
+) -> Dict[str, Any]:
+    """
+    Reduces per-track records to the handful of numbers the live view shows.
+
+    Deliberately tiny: people in frame, people in the waiting zone, people actually
+    waiting, and the newest arrival time so a rolling rate can be computed by the caller.
+    """
+    in_frame = len(records)
+    in_zone = sum(1 for r in records if r["in_zone"])
+    waiting = [r for r in records if r["is_waiting"]]
+
+    candidates: List[Dict[str, Any]] = []
+    for r in records:
+        x1, y1, x2, y2 = r["box"]
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        candidates.append(
+            {
+                "track_id": r["track_id"],
+                "box": [round(float(v), 1) for v in r["box"]],
+                "in_zone": r["in_zone"],
+                "waiting": r["is_waiting"],
+                "norm_box": [
+                    round(float(x1) / frame_w, 4),
+                    round(float(y1) / frame_h, 4),
+                    round(float(x2) / frame_w, 4),
+                    round(float(y2) / frame_h, 4),
+                ],
+                "center_norm": [round(cx / frame_w, 4), round(cy / frame_h, 4)],
+            }
+        )
+
+    return {
+        "people_in_frame": in_frame,
+        "people_in_waiting_zone": in_zone,
+        "people_waiting": len(waiting),
+        "mean_wait_dwell_s": round(
+            float(np.mean([r["longest_stationary_run_s"] for r in waiting])), 2
+        )
+        if waiting
+        else 0.0,
+        "tracks": candidates,
+    }
 
 
 def _in_zone(zone_mask: Optional[np.ndarray], x: float, y: float, frame_w: int, frame_h: int) -> bool:

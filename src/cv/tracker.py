@@ -109,6 +109,7 @@ class IoUTracker:
         max_misses: int = 12,
         min_hits: int = 3,
         velocity_smoothing: float = 0.6,
+        history_limit: int = 180,
     ):
         self.fps = fps
         self.iou_threshold = iou_threshold
@@ -116,6 +117,10 @@ class IoUTracker:
         self.max_misses = max_misses
         self.min_hits = min_hits
         self.velocity_smoothing = velocity_smoothing
+        # Per-track observation cap. A monitor can run for hours; without this the
+        # dwell analysis becomes quadratic in track age and eventually starves the
+        # process. 180 samples is ~36 s at 5 fps, far more than the analysis needs.
+        self.history_limit = history_limit
 
         self.tracks: List[Track] = []
         self._next_id = 1
@@ -166,6 +171,8 @@ class IoUTracker:
             tr.misses = 0
             tr._fps = self.fps
             tr.history.append((frame, float(new_center[0]), float(new_center[1]), new_box))
+            if len(tr.history) > self.history_limit:
+                del tr.history[: len(tr.history) - self.history_limit]
             if tr.hits >= self.min_hits:
                 tr.confirmed = True
 

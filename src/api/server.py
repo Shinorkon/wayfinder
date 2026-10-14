@@ -21,7 +21,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from src.cv.live_monitor import MonitorHub
+from src.cv.stop_analysis import zone_mask_from_rows
 from src.intelligence.deepseek_agent import DeepSeekDispatchAgent
+from src.intelligence.recommendation import live_recommendation, plain_recommendation
 from src.intelligence.telemetry import (
     DEFAULT_SCENARIO,
     SCENARIOS,
@@ -63,6 +66,45 @@ deepseek_agent = DeepSeekDispatchAgent()
 
 
 # ---------------------------------------------------------------------------
+# Continuous monitoring
+# ---------------------------------------------------------------------------
+
+def _sam3_factory():
+    """Loads SAM 3 lazily. Returns None if the weights are not present."""
+    from src.cv.sam3_masker import SAM3Masker
+
+    return SAM3Masker.get_instance()
+
+
+monitor_hub = MonitorHub(
+    detector_factory=lambda: __import__("src.cv.detector", fromlist=["PersonDetector"]).PersonDetector(),
+    sam3_factory=_sam3_factory,
+)
+
+# Waiting-zone raster per stop, reused from the offline analysis so live and offline
+# measurements mean the same thing. Built once at import from the stored artifacts.
+ZONE_MASKS: Dict[str, Any] = {}
+if analysis_index:
+    for row in analysis_index.get("stops", []):
+        zone = ((row.get("measured") or {}).get("waiting_zone")) or row.get("waiting_zone") or {}
+        mask = zone_mask_from_rows(zone.get("mask_rows"))
+        if mask is not None:
+            ZONE_MASKS[row["id"]] = mask
+
+
+def _stop_by_id(stop_id: str) -> Optional[Dict[str, Any]]:
+    return next((s for s in network_data["stops"] if s["id"] == stop_id), None)
+
+
+def _clip_path(stop: Dict[str, Any]) -> Optional[str]:
+    name = stop.get("video_filename")
+    if not name:
+        return None
+    path = os.path.join(FOOTAGE_DIR, name)
+    return path if os.path.exists(path) else None
+
+
+# ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
 
@@ -79,11 +121,21 @@ def health() -> Dict[str, Any]:
 
 @app.get("/api/meta")
 def meta() -> Dict[str, Any]:
-    """Everything a client needs to describe the data honestly."""
+    """Everything the client needs to describe the data honestly."""
     cov = (analysis_index or {}).get("coverage", {})
     return {
         "network": network_data.get("network"),
         "data_status": network_data.get("data_status"),
+        "network_geometry": [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "color": r.get("color"),
+                "waypoints": r.get("waypoints", []),
+                "osrm_geometry": r.get("osrm_geometry", []),
+            }
+            for r in network_data.get("routes", [])
+        ],
         "analysis": {
             "available": telemetry.has_analysis(),
             "generated_at": (analysis_index or {}).get("generated_at"),
@@ -94,14 +146,23 @@ def meta() -> Dict[str, Any]:
         "current_scenario": telemetry.scenario_meta,
         "method": {
             "perception": (
-                "YOLOv8n person detection (per frame) + IoU/constant-velocity tracking "
-                "(temporal) + dwell-density waiting-zone occupancy"
+                "YOLOv8n person detection per frame plus IoU/constant-velocity tracking "
+                "across frames"
             ),
             "measurement": (
-                "Arrival rate = distinct tracks entering the derived waiting zone per minute, "
-                "restricted to tracks that then remained stationary"
+                "Arrival rate = distinct tracks entering the derived waiting zone and then "
+                "standing still, per minute of footage"
             ),
             "wait_time": "Welch's formula E[W] = H/2 x (1 + CV^2)",
+            "detector_ms_note": "measured live by the monitor; see the performance block in /api/live/{stop_id}",
+            "live": {
+                "detector_target_fps": 5.0,
+                "segmentation": (
+                    "SAM 3 runs continuously in its own loop. One 1008x1008 forward pass takes "
+                    "roughly 14 s on this machine's CPU and the model only accepts 1008x1008 "
+                    "input, so segmentation cannot run at frame rate."
+                ),
+            },
             "limitations": [
                 "Clip footage is public reference material from other cities, not RTL cameras.",
                 "Track identity is IoU-based; dense crowds inflate arrival counts.",
@@ -109,6 +170,11 @@ def meta() -> Dict[str, Any]:
                 "No official RTL demand, fleet or timetable data is used anywhere.",
             ],
         },
+        "footage_note": (
+            "All footage is public reference video from other cities, used to exercise the "
+            "detector. It is not RTL and not Malé. Each clip's source and licence is recorded "
+            "in data/footage/SOURCES.json."
+        ),
         "disclaimer": (
             "Prototype for a datathon. Demand figures are measurements of public reference "
             "footage scaled by declared scenario factors, or are marked unavailable. Nothing "
@@ -197,6 +263,107 @@ def set_scenario(req: ScenarioRequest) -> Dict[str, Any]:
 class ReasonRequest(BaseModel):
     stop_id: str
     api_key: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Live monitoring
+# ---------------------------------------------------------------------------
+
+
+class MonitorRequest(BaseModel):
+    stop_id: str
+    fps: float = Field(5.0, ge=0.5, le=25.0, description="detection samples per second")
+    segmentation: bool = Field(True, description="also run the SAM 3 segmentation loop")
+
+
+@app.get("/api/live/{stop_id}")
+def live_state(stop_id: str) -> Dict[str, Any]:
+    """Current monitor state for a stop, plus the plain-language recommendation."""
+    stop = _stop_by_id(stop_id)
+    if not stop:
+        raise HTTPException(status_code=404, detail=f"stop {stop_id} not found")
+
+    state = telemetry.compute_stop(stop)
+    live = monitor_hub.snapshot(stop_id)
+    recommendation = plain_recommendation(state.dispatch, state.provenance)
+    if live:
+        recommendation = live_recommendation(
+            live, state.provenance.get("measured"), state.dispatch, state.provenance
+        )
+
+    return {
+        "stop_id": stop_id,
+        "stop_name": stop.get("name"),
+        "live": live,
+        "monitoring": live is not None and live.get("running", False),
+        "recommendation": recommendation,
+        "provenance": state.provenance,
+        "active_monitors": monitor_hub.active(),
+    }
+
+
+@app.post("/api/live/start")
+def live_start(req: MonitorRequest) -> Dict[str, Any]:
+    """Starts continuous monitoring of one stop. Only the newest stop keeps running."""
+    stop = _stop_by_id(req.stop_id)
+    if not stop:
+        raise HTTPException(status_code=404, detail=f"stop {req.stop_id} not found")
+    clip = _clip_path(stop)
+    if not clip:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"No footage is available for {req.stop_id}, so it cannot be monitored. "
+                "Wayfinder reports this rather than simulating a feed."
+            ),
+        )
+
+    # One monitored stop at a time: the detector is a shared resource and pretending to
+    # watch every camera at once would be a claim this hardware cannot support.
+    for other in monitor_hub.active():
+        if other != req.stop_id:
+            monitor_hub.stop(other)
+
+    monitor = monitor_hub.start(
+        stop_id=req.stop_id,
+        clip_path=clip,
+        zone_mask=ZONE_MASKS.get(req.stop_id),
+        fps=req.fps,
+        with_segmentation=req.segmentation,
+    )
+    return {
+        "status": "started",
+        "stop_id": req.stop_id,
+        "fps": req.fps,
+        "segmentation": req.segmentation and monitor_hub.sam3() is not None,
+        "sam3_available": monitor_hub.sam3() is not None,
+        "zone_calibrated": req.stop_id in ZONE_MASKS,
+    }
+
+
+@app.post("/api/live/stop")
+def live_stop(req: MonitorRequest) -> Dict[str, Any]:
+    stopped = monitor_hub.stop(req.stop_id)
+    return {"status": "stopped" if stopped else "not_running", "stop_id": req.stop_id}
+
+
+@app.get("/api/live")
+def live_all() -> Dict[str, Any]:
+    """Every active monitor, newest state only. Used by the map view."""
+    out = []
+    for stop_id in monitor_hub.active():
+        snap = monitor_hub.snapshot(stop_id)
+        if snap:
+            out.append(
+                {
+                    "stop_id": stop_id,
+                    "people_in_frame": snap["people_in_frame"],
+                    "people_waiting": snap["people_waiting"],
+                    "arrival_rate_pax_per_min": snap["arrival_rate_pax_per_min"],
+                    "age_s": snap["age_s"],
+                }
+            )
+    return {"monitors": out}
 
 
 @app.post("/api/advisory")

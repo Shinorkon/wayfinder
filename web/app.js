@@ -1,747 +1,547 @@
 /**
- * Wayfinder dashboard.
+ * Wayfinder live dashboard.
  *
- * Rules this file follows, because the previous build broke all of them:
- *   - No hardcoded passenger numbers, wait times, headways or fleet figures anywhere.
- *     Every displayed value comes from the API in the same render pass.
- *   - Nothing is shown without its provenance. Measured, simulated and modelled values
- *     are labelled as such.
- *   - No fallback mock data. If the API is unavailable the screen says so.
+ * Deliberately small. One camera, three numbers, one sentence.
+ *
+ * How the live view works: the backend continuously monitors the selected stop and
+ * publishes detections with normalised coordinates. This file draws those boxes and
+ * masks onto a canvas laid over the playing video. The video element plays the clip
+ * itself, so the picture is smooth; the box overlay refreshes a few times a second
+ * and therefore trails the picture slightly. That lag is shown to the user rather
+ * than hidden.
  */
+
+const API = {
+  meta: '/api/meta',
+  stops: '/api/stops',
+  live: (id) => `/api/live/${id}`,
+  liveStart: '/api/live/start',
+  liveStop: '/api/live/stop',
+  scenario: '/api/scenario',
+};
 
 const state = {
   meta: null,
   stops: [],
-  telemetry: null,
-  currentStopId: null,
-  mediaMode: 'video',
+  stopId: null,
+  mode: 'live',
+  monitoring: false,
+  overlay: null,
+  map: null,
   markers: {},
-  busMarkers: [],
-  busTimer: null,
-  loadToken: 0,
+  timers: { overlay: null, stop: null },
+  lastWaiting: 0,
+  lastWaitingAt: 0,
 };
 
 const $ = (id) => document.getElementById(id);
 
-// ---------------------------------------------------------------- utilities
+// ------------------------------------------------------------------ helpers
 
-const fmt = (value, digits = 1) =>
-  value === null || value === undefined || Number.isNaN(value) ? '—' : Number(value).toFixed(digits);
-
-const STATUS_CLASS = {
-  NORMAL: 'success',
-  ELEVATED: 'warning',
-  SURGE: 'danger',
-  CAPACITY_FAILURE: 'danger',
-  NO_ROUTE: 'info',
-  MEASUREMENT_SUSPECT: 'warning',
-  NO_DATA: 'info',
-};
-
-const CONFIDENCE_CLASS = { high: 'success', medium: 'warning', low: 'danger', none: 'info' };
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-// -------------------------------------------------------------------- clock
-
-function initClock() {
-  const tick = () => {
-    const now = new Date();
-    const mvt = new Date(now.getTime() + now.getTimezoneOffset() * 60000 + 5 * 3600000);
-    const clock = $('live-clock');
-    if (clock) clock.textContent = `${mvt.toTimeString().split(' ')[0]} MVT`;
-  };
-  tick();
-  setInterval(tick, 1000);
-}
-
-// -------------------------------------------------------------------- theme
-
-function initTheme() {
-  const stored = localStorage.getItem('wayfinder_theme');
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const theme = stored || (prefersDark ? 'dark' : 'light');
-  applyTheme(theme);
-  $('btn-theme').addEventListener('click', () => {
-    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    localStorage.setItem('wayfinder_theme', next);
-    applyTheme(next);
-  });
-}
-
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  const btn = $('btn-theme');
-  btn.textContent = theme === 'dark' ? 'Light' : 'Dark';
-  btn.setAttribute('aria-pressed', String(theme === 'dark'));
-}
-
-// --------------------------------------------------------------------- map
-
-function initMap() {
-  const map = L.map('osm-map', { center: [4.2035, 73.5255], zoom: 13, zoomControl: true });
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  }).addTo(map);
-  return map;
-}
-
-let map = null;
-
-// ---------------------------------------------------------------- data load
-
-async function fetchJson(url, options) {
+async function getJson(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) {
-    throw new Error(`${url} responded ${response.status}`);
+    let detail = `${response.status}`;
+    try {
+      const body = await response.json();
+      if (body.detail) detail = body.detail;
+    } catch (_) { /* non-JSON error body */ }
+    throw new Error(detail);
   }
   return response.json();
 }
 
-async function boot() {
-  initClock();
-  initTheme();
-  map = initMap();
+const num = (value, digits = 0) =>
+  value === null || value === undefined || Number.isNaN(value) ? '–' : Number(value).toFixed(digits);
 
+// --------------------------------------------------------------------- boot
+
+async function boot() {
   try {
-    state.meta = await fetchJson('/api/meta');
+    state.meta = await getJson(API.meta);
   } catch (error) {
-    showFatal(`Cannot reach the Wayfinder API (${error.message}). Start the server with ./run.sh.`);
+    $('sentence').textContent =
+      `Cannot reach the Wayfinder server (${error.message}). Start it with ./run.sh`;
     return;
   }
 
-  renderMethod(state.meta);
-  renderScenarios(state.meta.scenarios, state.meta.current_scenario.key);
-  renderProvenanceStrip();
+  buildScenarioSelect();
+  buildAbout();
+  wireControls();
 
-  $('btn-method').addEventListener('click', () => $('method-modal').showModal());
-  $('btn-close-method').addEventListener('click', () => $('method-modal').close());
-  $('btn-advisory').addEventListener('click', requestAdvisory);
-  ['video', 'detections', 'segmentation', 'hybrid'].forEach((mode) => {
-    const btn = $(`btn-view-${mode}`);
-    if (btn) btn.addEventListener('click', () => switchMedia(mode));
-  });
-
-  await loadNetworkAndStops();
+  const payload = await getJson(API.stops);
+  state.stops = payload.stops;
+  initMap();
+  renderStops();
+  // Poll unconditionally from boot: the live state is what this screen is about, and
+  // starting the interval only on a mode switch left the first view frozen.
+  startPolling();
+  selectStop(state.stops[0].id);
 }
 
-function showFatal(message) {
-  const strip = $('prov-disclosure');
-  strip.textContent = message;
-  document.querySelector('.status-strip').classList.add('is-blocked');
-  $('prov-kind').textContent = 'offline';
-}
-
-async function loadNetworkAndStops() {
-  const token = ++state.loadToken;
-  const [network, stopsPayload, telemetry] = await Promise.all([
-    fetchJson('/api/network'),
-    fetchJson('/api/stops'),
-    fetchJson('/api/telemetry'),
-  ]);
-  if (token !== state.loadToken) return; // a newer scenario request superseded this one
-
-  state.telemetry = telemetry;
-  state.stops = stopsPayload.stops;
-
-  renderKpis(telemetry);
-  drawRoutes(network.routes);
-  renderStopPins();
-  initBuses(network.routes);
-
-  const stillExists = state.stops.some((s) => s.id === state.currentStopId);
-  selectStop(stillExists ? state.currentStopId : state.stops[0]?.id);
-}
-
-// -------------------------------------------------------------------- KPIs
-
-function renderKpis(telemetry) {
-  const k = telemetry.kpis;
-
-  $('kpi-baseline-wait').textContent = fmt(k.mean_baseline_wait_min);
-  $('kpi-optimized-wait').textContent = fmt(k.mean_optimized_wait_min);
-
-  const delta = $('kpi-wait-delta');
-  const pct = k.wait_change_pct;
-  const direction = k.wait_change_direction;
-  delta.textContent =
-    direction === 'reduction'
-      ? `${fmt(Math.abs(pct))}% lower`
-      : direction === 'increase'
-        ? `${fmt(Math.abs(pct))}% HIGHER (trade-off)`
-        : 'no change';
-  delta.className = `badge ${direction === 'reduction' ? 'success' : direction === 'increase' ? 'warning' : ''}`;
-
-  $('kpi-inflow').textContent = fmt(k.total_inflow_pax_per_min, 2);
-  $('kpi-inflow-note').textContent = `${k.status_counts.CAPACITY_FAILURE || 0} stop(s) over capacity at the recommended headway`;
-
-  const cov = state.meta.analysis.coverage || {};
-  const confidence = cov.confidence_counts || {};
-  const measured = telemetry.data_status.stops_with_measurements ?? 0;
-  const evaluable = (confidence.high || 0) + (confidence.medium || 0);
-  $('kpi-coverage').textContent = `${evaluable}`;
-  $('kpi-coverage-unit').textContent = `of ${telemetry.data_status.stops_total} stops`;
-  $('kpi-confidence').textContent =
-    `${measured} have footage · ${confidence.medium || 0} medium, ${confidence.low || 0} low confidence`;
-}
-
-function renderProvenanceStrip() {
-  const strip = document.querySelector('.status-strip');
-  const current = state.meta.current_scenario;
-  const simulated = current.simulated;
-
-  strip.classList.toggle('is-measured', !simulated);
-  strip.classList.toggle('is-blocked', false);
-  $('prov-kind').textContent = simulated ? 'simulated scenario' : 'measured + modelled';
-
-  const coverage = state.meta.analysis.coverage || {};
-  const conf = coverage.confidence_counts || {};
-  const low = conf.low || 0;
-  const total = coverage.stops_total || 0;
-
-  let text = simulated
-    ? `${current.description} Base rates are measured from public reference footage of other cities.`
-    : `Arrival rates measured from public reference footage. Wait times are modelled, not observed.`;
-
-  if (!simulated && low > 0) {
-    text += ` ${low} of ${total} stops have a low-confidence measurement, so their headway is held at the timetable rather than compressed.`;
-  }
-  text += ` ${state.meta.disclaimer}`;
-  $('prov-disclosure').textContent = text;
-}
-
-function renderScenarios(scenarios, activeKey) {
-  const row = $('scenario-pills');
-  row.innerHTML = '';
-  scenarios.forEach((scenario) => {
-    const btn = el('button', `pill${scenario.key === activeKey ? ' active' : ''}`);
-    btn.type = 'button';
-    btn.setAttribute('role', 'radio');
-    btn.setAttribute('aria-checked', String(scenario.key === activeKey));
-    btn.dataset.key = scenario.key;
-    btn.appendChild(document.createTextNode(scenario.label));
-    if (scenario.simulated) {
-      const tag = el('span', 'sim', 'sim');
-      tag.title = 'Simulated: a declared multiplier applied to measured base rates';
-      btn.appendChild(tag);
-    }
-    btn.title = scenario.description;
-    btn.addEventListener('click', () => setScenario(scenario.key));
-    row.appendChild(btn);
+function buildScenarioSelect() {
+  const select = $('scenario');
+  select.innerHTML = '';
+  state.meta.scenarios.forEach((scenario) => {
+    const option = document.createElement('option');
+    option.value = scenario.key;
+    option.textContent = scenario.simulated ? `${scenario.label} (simulated)` : scenario.label;
+    if (scenario.key === state.meta.current_scenario.key) option.selected = true;
+    select.appendChild(option);
   });
 }
 
-async function setScenario(key) {
-  const buttons = document.querySelectorAll('#scenario-pills .pill');
-  buttons.forEach((b) => {
-    const active = b.dataset.key === key;
-    b.classList.toggle('active', active);
-    b.setAttribute('aria-checked', String(active));
-  });
-
-  try {
-    const payload = await fetchJson('/api/scenario', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scenario: key }),
-    });
-    state.meta.current_scenario = payload.scenario;
-    renderProvenanceStrip();
-    await loadNetworkAndStops();
-  } catch (error) {
-    $('prov-disclosure').textContent = `Could not change scenario: ${error.message}`;
-  }
+function wireControls() {
+  $('scenario').addEventListener('change', (event) => setScenario(event.target.value));
+  $('mode-live').addEventListener('click', () => setMode('live'));
+  $('mode-snap').addEventListener('click', () => setMode('snap'));
+  const openAbout = () => $('about').showModal();
+  $('info-btn').addEventListener('click', openAbout);
+  $('about-btn').addEventListener('click', openAbout);
 }
 
-// -------------------------------------------------------------------- map
+// ---------------------------------------------------------------------- map
 
-function drawRoutes(routes) {
-  routes.forEach((route) => {
-    const geometry = route.osrm_geometry || route.waypoints || [];
-    if (!geometry.length) return;
-    L.polyline(geometry, {
-      color: '#ffffff', weight: 6, opacity: 0.9, lineCap: 'round', lineJoin: 'round',
-    }).addTo(map);
-    L.polyline(geometry, {
-      color: route.color || '#0b6bcb',
-      weight: 4,
-      opacity: 0.95,
-      dashArray: route.id === 'R3' ? '8 6' : undefined,
-      lineCap: 'round',
-      lineJoin: 'round',
-    }).addTo(map);
-  });
+function initMap() {
+  state.map = L.map('map', { center: [4.2035, 73.5255], zoom: 12, zoomControl: true });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors',
+  }).addTo(state.map);
 
-  const legend = $('route-legend');
-  legend.innerHTML = '';
-  routes.forEach((route) => {
-    const chip = el('span', 'legend-chip');
-    const dot = el('span', 'chip-color');
-    dot.style.background = route.color || '#0b6bcb';
-    chip.appendChild(dot);
-    chip.appendChild(document.createTextNode(`${route.id}: ${route.name.replace(/^Route \d+:\s*/, '')}`));
-    legend.appendChild(chip);
+  const network = state.meta.network_geometry || [];
+  network.forEach((route) => {
+    const points = route.osrm_geometry || route.waypoints || [];
+    if (!points.length) return;
+    L.polyline(points, { color: '#ffffff', weight: 5, opacity: 0.55 }).addTo(state.map);
+    L.polyline(points, { color: route.color || '#4ea3f5', weight: 3, opacity: 0.9 }).addTo(state.map);
   });
 }
 
-function pinClass(stop) {
-  const status = stop.dispatch?.status;
-  if (status === 'CAPACITY_FAILURE' || status === 'SURGE') return 'surge';
-  if (status === 'ELEVATED') return 'elevated';
-  if (status === 'NO_ROUTE' || status === 'NO_DATA') return 'nodata';
-  return 'normal';
-}
-
-function renderStopPins() {
-  Object.values(state.markers).forEach((marker) => map.removeLayer(marker));
-  state.markers = {};
-
+function renderStops() {
   state.stops.forEach((stop) => {
-    const queue = stop.queue_pax;
-    const label = queue === null || queue === undefined ? '?' : Math.round(queue);
-    const cls = pinClass(stop);
+    const waiting = stop.queue_pax;
+    const colour = stop.provenance?.kind === 'measured' ? '#4ea3f5' : '#6b7891';
     const icon = L.divIcon({
-      html: `<div class="stop-pin ${cls}${stop.id === state.currentStopId ? ' selected' : ''}" style="width:28px;height:28px">${label}</div>`,
-      className: 'custom-stop-icon',
-      iconSize: [28, 28],
-      iconAnchor: [14, 14],
+      html: `<div class="stop-dot${stop.id === state.stopId ? ' live' : ''}" style="background:${colour}"></div>`,
+      className: '',
+      iconSize: [15, 15],
+      iconAnchor: [7, 7],
     });
-    const marker = L.marker([stop.lat, stop.lng], { icon, title: stop.name }).addTo(map);
+    const marker = L.marker([stop.lat, stop.lng], { icon, title: stop.name }).addTo(state.map);
     marker.bindTooltip(
-      `<strong>${stop.name}</strong><br>${label} standing queue (measured)<br>` +
-        `${fmt(stop.arrival_rate_pax_per_min, 2)} pax/min inflow (measured)<br>` +
-        `status: ${stop.dispatch?.status || 'unknown'}`,
-      { direction: 'top', offset: [0, -16] },
+      `<b>${stop.name}</b><br>${waiting === null ? 'no measurement' : `${num(waiting)} waiting`}`,
+      { direction: 'top', offset: [0, -10] },
     );
     marker.on('click', () => selectStop(stop.id));
     state.markers[stop.id] = marker;
   });
 }
 
-function initBuses(routes) {
-  state.busMarkers.forEach((b) => map.removeLayer(b.marker));
-  state.busMarkers = [];
-  if (state.busTimer) clearInterval(state.busTimer);
-
-  // One bus per route, moving along that route's real road geometry.
-  const routeBusCount = [];
-  routes.forEach((route) => {
-    const buses = route.id === 'R1' ? 2 : 1;
-    for (let i = 0; i < buses; i += 1) {
-      routeBusCount.push({ route, progress: (i + 1) / (buses + 1) });
-    }
-  });
-
-  routeBusCount.forEach(({ route, progress }) => {
-    const geometry = route.osrm_geometry || route.waypoints || [];
-    if (geometry.length < 2) return;
-    const icon = L.divIcon({
-      html: `<div class="bus-chip">${route.id}</div>`,
-      className: 'bus-div-icon',
-      iconSize: [26, 16],
-      iconAnchor: [13, 8],
-    });
-    const marker = L.marker(geometry[0], { icon, interactive: false }).addTo(map);
-    state.busMarkers.push({ route, geometry, progress, speed: 0.0022, marker });
-  });
-
-  const step = () => {
-    state.busMarkers.forEach((bus) => {
-      const points = bus.geometry;
-      const segments = points.length - 1;
-      bus.progress = (bus.progress + bus.speed) % 1;
-      const position = bus.progress * segments;
-      const index = Math.min(segments - 1, Math.floor(position));
-      const frac = position - index;
-      const [lat1, lng1] = points[index];
-      const [lat2, lng2] = points[index + 1];
-      bus.marker.setLatLng([lat1 + (lat2 - lat1) * frac, lng1 + (lng2 - lng1) * frac]);
-    });
-  };
-
-  step();
-  state.busTimer = setInterval(step, 1500);
-}
-
-// --------------------------------------------------------------- inspector
+// ------------------------------------------------------------ stop switching
 
 function selectStop(stopId) {
-  const stop = state.stops.find((s) => s.id === stopId);
-  if (!stop) return;
-  state.currentStopId = stopId;
+  if (!stopId) return;
+  state.stopId = stopId;
 
   Object.entries(state.markers).forEach(([id, marker]) => {
-    const node = marker.getElement()?.querySelector('.stop-pin');
-    if (node) node.classList.toggle('selected', id === stopId);
+    const dot = marker.getElement()?.querySelector('.stop-dot');
+    if (dot) dot.classList.toggle('live', id === stopId);
   });
 
-  renderStopHeader(stop);
-  renderMeasuredDemand(stop);
-  renderModel(stop);
-  renderMedia(stop);
-}
+  const stop = state.stops.find((s) => s.id === stopId);
+  if (!stop) return;
 
-function renderStopHeader(stop) {
-  $('stop-zone').textContent = stop.zone || 'Greater Malé';
   $('stop-name').textContent = stop.name;
-  $('stop-routes').textContent = stop.served_by_routes?.length
-    ? `Served by ${stop.served_by_routes.join(', ')}`
-    : 'Not served by any configured route';
+  $('stop-sub').textContent = stop.served_by_routes?.length
+    ? `${stop.zone || ''} · routes ${stop.served_by_routes.join(', ')}`
+    : `${stop.zone || ''} · no route serves this stop`;
 
-  const status = stop.dispatch?.status || 'UNKNOWN';
-  const pill = $('stop-status');
-  pill.textContent = status.replace(/_/g, ' ');
-  pill.className = `status-pill ${STATUS_CLASS[status] || ''}`;
+  $('camera-note').textContent = stop.footage_provenance?.title
+    ? `Camera: ${stop.footage_provenance.title}. ${stop.footage_provenance.disclosure || ''}`
+    : 'No camera footage is mapped to this stop.';
 
-  const box = $('stop-warnings');
-  box.innerHTML = '';
-  (stop.warnings || []).forEach((warning) => {
-    box.appendChild(el('div', `warn-item${/cannot be cleared|over capacity/i.test(warning) ? ' danger' : ''}`, warning));
-  });
+  const video = $('video');
+  video.src = stop.video_filename ? `/footage/${stop.video_filename}` : '';
+  video.play().catch(() => {});
+
+  applySnapshotFallback(stop);
+  if (state.mode === 'live') startMonitoring();
+  else stopMonitoring();
+  refresh();
 }
 
-function renderMeasuredDemand(stop) {
-  const provenance = stop.provenance || {};
-  const confidence = provenance.confidence || 'none';
-  const measured = provenance.kind === 'measured';
-
-  $('measurement-sub').textContent = measured
-    ? `measured, ${confidence} confidence`
-    : 'no measurement available';
-
-  const rateCell = $('val-rate');
-  rateCell.textContent = measured ? `${fmt(stop.arrival_rate_pax_per_min, 2)} pax/min` : 'not measured';
-  $('val-rate-sub').textContent = measured
-    ? stop.scenario_multiplier !== 1
-      ? `= measured ${fmt(stop.arrival_rate_base_pax_per_min, 2)} × scenario factor ${stop.scenario_multiplier}`
-      : 'measured directly from footage'
-    : 'no analysed footage is mapped to this stop';
-
-  $('val-queue-base').textContent = measured ? `${fmt(stop.queue_baseline_measured)} pax` : '—';
-  $('val-queue-base-sub').textContent = 'mean standing queue over the clip';
-
-  $('val-queue').textContent = stop.queue_pax === null ? '—' : `${fmt(stop.queue_pax)} pax`;
-  $('val-queue-sub').textContent = stop.queue_source || '';
-
-  $('val-dwell').textContent = measured ? `${fmt(provenance.mean_dwell_s, 1)} s` : '—';
-  $('val-dwell-sub').textContent = measured
-    ? `from ${provenance.waiting_tracks}/${provenance.unique_tracks} tracked people`
-    : '';
-
-  drawSparkline(provenance.queue_series, provenance.analysed_span_s);
-  renderProvenanceBody(stop);
-}
-
-function drawSparkline(series, spanSeconds) {
-  const svg = $('queue-spark');
-  svg.innerHTML = '';
-  const note = $('spark-note');
-
-  if (!series || !series.waiting_pax || series.waiting_pax.length < 2) {
-    note.textContent = 'no time series available';
-    return;
-  }
-
-  const values = series.waiting_pax;
-  const times = series.t_s;
-  const width = 320;
-  const height = 64;
-  const padding = 6;
-  const maxValue = Math.max(1, ...values);
-
-  const x = (i) => padding + (i / (values.length - 1)) * (width - 2 * padding);
-  const y = (v) => height - padding - (v / maxValue) * (height - 2 * padding);
-
-  const ns = 'http://www.w3.org/2000/svg';
-  const area = document.createElementNS(ns, 'path');
-  const points = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
-  area.setAttribute('d', `M${x(0).toFixed(1)},${(height - padding).toFixed(1)} L${points.join(' L')} L${x(values.length - 1).toFixed(1)},${(height - padding).toFixed(1)} Z`);
-  area.setAttribute('class', 'area');
-  svg.appendChild(area);
-
-  const line = document.createElementNS(ns, 'polyline');
-  line.setAttribute('points', points.join(' '));
-  line.setAttribute('class', 'line');
-  svg.appendChild(line);
-
-  const label = document.createElementNS(ns, 'text');
-  label.setAttribute('x', padding);
-  label.setAttribute('y', 11);
-  label.setAttribute('class', 'lbl');
-  label.textContent = `peak ${maxValue} pax`;
-  svg.appendChild(label);
-
-  const axisLabel = document.createElementNS(ns, 'text');
-  axisLabel.setAttribute('x', width - padding);
-  axisLabel.setAttribute('y', 11);
-  axisLabel.setAttribute('class', 'lbl');
-  axisLabel.setAttribute('text-anchor', 'end');
-  axisLabel.textContent = `${fmt(spanSeconds, 0)} s analysed`;
-  svg.appendChild(axisLabel);
-
-  note.textContent = `every ${(times[1] - times[0]).toFixed(1)} s`;
-}
-
-function renderProvenanceBody(stop) {
-  const provenance = stop.provenance || {};
-  const body = $('prov-body');
-  body.innerHTML = '';
-
-  const add = (label, value, warn = false) => {
-    if (value === null || value === undefined || value === '') return;
-    const item = el('div', `prov-item${warn ? ' warn' : ''}`);
-    const strong = el('strong', null, `${label}: `);
-    item.appendChild(strong);
-    item.appendChild(document.createTextNode(String(value)));
-    body.appendChild(item);
-  };
-
-  if (provenance.kind === 'measured') {
-    add('Footage', provenance.clip_title);
-    add('Location of footage', provenance.clip_city);
-    add('Source / licence', `${provenance.clip_source} — ${provenance.clip_license}`);
-    add('Analysed window', `${fmt(provenance.analysed_span_s, 1)} s`);
-    add('Analysis method', provenance.analysis_method);
-    add('Disclosure', provenance.disclosure, true);
-    if (provenance.scenario_scaling?.applied) {
-      add('Scenario scaling', `×${provenance.scenario_scaling.factor} applied to the measured base rate`);
-    }
-    (provenance.confidence_reasons || []).forEach((reason) => add('Confidence note', reason, true));
-    (provenance.limitations || []).forEach((limitation) => add('Limitation', limitation, true));
-  } else {
-    add('Status', provenance.note, true);
-  }
-}
-
-function renderModel(stop) {
-  const d = stop.dispatch || {};
-  const hasModel = d.default_headway_min !== undefined && d.default_headway_min !== null;
-
-  $('dispatch-sub').textContent = hasModel
-    ? `${d.recommended_headway_source || ''}`
-    : d.status === 'NO_ROUTE'
-      ? 'no route serves this stop'
-      : 'no demand measurement';
-
-  $('val-headway-base').textContent = hasModel ? `${fmt(d.default_headway_min, 0)} min` : '—';
-  $('val-headway-rec').textContent = hasModel ? `${fmt(d.recommended_headway_min, 0)} min` : '—';
-  $('val-headway-sub').textContent = hasModel
-    ? d.headway_change_pct === 0
-      ? 'unchanged from the timetable'
-      : `${d.headway_change_pct > 0 ? '+' : ''}${fmt(d.headway_change_pct)}% vs timetable`
-    : '';
-
-  $('val-bus').textContent = d.bus_type ? d.bus_type.replace(/_/g, ' ') : '—';
-  $('val-bus-sub').textContent = d.bus_capacity_pax
-    ? `${d.bus_capacity_pax} seats, ${fmt(d.effective_capacity_pax, 0)} usable after reserve`
-    : '';
-
-  $('val-service').textContent = hasModel
-    ? `${fmt(d.offered_service_pax_per_min, 2)} / ${fmt(d.demand_rate_pax_per_min, 2)}`
-    : '—';
-  $('val-service-sub').textContent = hasModel
-    ? d.capacity_ok
-      ? `pax/min offered vs demanded — net ${fmt(d.net_clearance_pax_per_min, 2)}, utilisation ${fmt((d.utilization ?? 0) * 100, 0)}%`
-      : 'demand exceeds offered capacity at this headway'
-    : '';
-
-  $('val-buses').textContent = hasModel ? `${d.buses_required}` : '—';
-  $('val-buses-sub').textContent = hasModel
-    ? d.fleet_shortfall
-      ? `shortfall of ${d.fleet_shortfall} against ${d.buses_assigned} assignable`
-      : `${d.buses_assigned} assignable, ${d.extra_buses_to_inject} added`
-    : '';
-
-  $('directive-text').textContent = d.directive_summary || '—';
-
-  const list = $('cot-list');
-  list.innerHTML = '';
-  (d.reasoning_steps || []).forEach((step) => list.appendChild(el('div', 'cot-item', step)));
-  if (d.queue_clear_note) list.appendChild(el('div', 'cot-item', `Queue clearance: ${d.queue_clear_note}`));
-  if (d.baseline_formula) list.appendChild(el('div', 'cot-item', `Baseline wait: ${d.baseline_formula}`));
-  if (d.optimized_formula) list.appendChild(el('div', 'cot-item', `Recommended wait: ${d.optimized_formula}`));
-  list.appendChild(el('div', 'cot-item', `Wait figures are ${d.wait_reduction_source || 'modelled'}.`));
-
-  $('advisory-box').hidden = true;
-  $('btn-advisory').disabled = !hasModel;
-}
-
-// -------------------------------------------------------------------- media
-
-function renderMedia(stop) {
-  const provenance = stop.footage_provenance || {};
-  const video = $('stop-video');
-  const image = $('stop-cv-image');
-
-  if (stop.video_filename) {
-    const src = `/footage/${stop.video_filename}`;
-    if (!video.src.endsWith(stop.video_filename)) {
-      video.src = src;
-      video.play().catch(() => {});
-    }
-  }
-
-  const caption = provenance.title
-    ? `${provenance.title} — reference footage, not RTL and not Malé`
-    : 'No footage mapped to this stop';
-  $('media-cap').textContent = caption;
-
-  $('footage-line').textContent = provenance.title
-    ? `Keyframe at ${fmt(stop.keyframe_timestamp_s, 1)}s · ${stop.detections_in_keyframe ?? '—'} people detected in that frame · ${stop.segmentation?.available ? `SAM 3: ${stop.segmentation.masks} masks (presence ${fmt(stop.segmentation.presence_score, 2)})` : 'SAM 3 layer not rendered'} · ${provenance.disclosure || ''}`
-    : 'No footage has been analysed for this stop, so no detection overlay exists.';
-
-  switchMedia(state.mediaMode);
-}
-
-function switchMedia(mode) {
-  state.mediaMode = mode;
-  const stop = state.stops.find((s) => s.id === state.currentStopId) || {};
-  const keyframes = stop.keyframes || {};
-  const video = $('stop-video');
-  const image = $('stop-cv-image');
-
-  ['video', 'detections', 'segmentation', 'hybrid'].forEach((m) => {
-    const btn = $(`btn-view-${m}`);
-    if (!btn) return;
-    const active = m === mode;
-    btn.classList.toggle('active', active);
-    btn.setAttribute('aria-selected', String(active));
-  });
-
-  if (mode === 'video') {
-    video.style.display = 'block';
-    image.style.display = 'none';
-    return;
-  }
-
-  const available = keyframes[mode];
-  video.style.display = 'none';
-  image.style.display = 'block';
-  if (available) {
-    image.src = available;
-    image.alt =
-      mode === 'detections'
-        ? 'YOLOv8 person detections on a reference frame'
-        : mode === 'segmentation'
-          ? 'SAM 3 segmentation of waiting passengers on a reference frame'
-          : 'Combined segmentation and detection overlay';
+function applySnapshotFallback(stop) {
+  const image = $('snapshot');
+  const frames = stop.keyframes || {};
+  if (frames.detections) {
+    image.src = frames.detections;
+    image.alt = 'Detections on a reference frame';
   } else {
     image.removeAttribute('src');
-    image.alt = 'No overlay rendered for this layer';
   }
+  // The snapshot layer is only ever visible in Snapshots mode; leaving it loaded under
+  // the live video made the pre-rendered banner bleed through the picture.
+  const snapMode = state.mode === 'snap';
+  image.hidden = !snapMode;
+  $('video').hidden = snapMode;
 }
 
-// ----------------------------------------------------------------- advisory
+// ------------------------------------------------------------------- modes
 
-async function requestAdvisory() {
-  const stop = state.stops.find((s) => s.id === state.currentStopId);
-  if (!stop) return;
-  const btn = $('btn-advisory');
-  const box = $('advisory-box');
-  btn.disabled = true;
-  const original = btn.textContent;
-  btn.textContent = 'Requesting…';
+function setMode(mode) {
+  state.mode = mode;
+  document.body.classList.toggle('mode-live', mode === 'live');
+  document.body.classList.toggle('mode-snap', mode === 'snap');
+  $('mode-live').classList.toggle('active', mode === 'live');
+  $('mode-snap').classList.toggle('active', mode === 'snap');
+  $('mode-live').setAttribute('aria-selected', String(mode === 'live'));
+  $('mode-snap').setAttribute('aria-selected', String(mode === 'snap'));
 
+  $('video').hidden = mode !== 'live';
+  // In live mode the canvas overlay draws the boxes; the pre-rendered snapshot JPEG
+  // already has boxes and a provenance banner burned in, so it must not be visible.
+  $('snapshot').hidden = mode !== 'snap';
+  if (mode === 'snap') stopMonitoring();
+  else startMonitoring();
+}
+
+// --------------------------------------------------------------- monitoring
+
+async function startMonitoring() {
+  if (state.monitoring) return;
+  const stop = state.stops.find((s) => s.id === state.stopId);
+  if (!stop?.video_filename) {
+    setLiveBadge('off', 'no camera for this stop');
+    return;
+  }
+
+  setLiveBadge('busy', 'starting monitor…');
   try {
-    const payload = await fetchJson('/api/advisory', {
+    const result = await getJson(API.liveStart, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stop_id: stop.id }),
+      body: JSON.stringify({ stop_id: state.stopId, fps: 5, segmentation: true }),
     });
-    renderAdvisory(payload);
-  } catch (error) {
-    box.hidden = false;
-    box.innerHTML = '';
-    box.appendChild(el('h4', null, 'Advisory unavailable'));
-    box.appendChild(el('p', null, `The advisory endpoint failed: ${error.message}. The computed numbers above are unaffected.`));
-  } finally {
-    btn.disabled = false;
-    btn.textContent = original;
-  }
-}
-
-function renderAdvisory(payload) {
-  const box = $('advisory-box');
-  box.hidden = false;
-  box.innerHTML = '';
-
-  if (!payload.available) {
-    box.appendChild(el('h4', null, 'Deterministic engine narrative'));
-    box.appendChild(el('p', 'muted', payload.reason || 'No language model configured.'));
-  } else {
-    box.appendChild(el('h4', null, 'DeepSeek advisory commentary'));
-  }
-
-  const advisory = payload.advisory || {};
-  if (advisory.summary) box.appendChild(el('p', null, advisory.summary));
-
-  if (advisory.advisory_points?.length) {
-    const ul = el('ul');
-    advisory.advisory_points.forEach((point) => ul.appendChild(el('li', null, point)));
-    box.appendChild(ul);
-  }
-  if (advisory.data_caveats?.length) {
-    box.appendChild(el('h4', null, 'Caveats'));
-    const ul = el('ul');
-    advisory.data_caveats.forEach((caveat) => ul.appendChild(el('li', null, caveat)));
-    box.appendChild(ul);
-  }
-  box.appendChild(el('p', 'muted', 'Advisory text is commentary only; every number on this screen comes from the deterministic model.'));
-}
-
-// ------------------------------------------------------------------- method
-
-function renderMethod(meta) {
-  const body = $('method-body');
-  body.innerHTML = '';
-
-  const section = (title, content) => {
-    body.appendChild(el('h3', null, title));
-    if (typeof content === 'string') {
-      const p = el('p', null, content);
-      body.appendChild(p);
-    } else {
-      const ul = el('ul');
-      content.forEach((item) => ul.appendChild(el('li', null, item)));
-      body.appendChild(ul);
+    state.monitoring = true;
+    if (!result.zone_calibrated) {
+      setLiveBadge('busy', 'monitoring (waiting zone not calibrated)');
     }
+  } catch (error) {
+    setLiveBadge('off', `cannot monitor: ${error.message}`);
+  }
+  refresh();
+}
+
+async function stopMonitoring() {
+  if (!state.monitoring) return;
+  state.monitoring = false;
+  try {
+    await getJson(API.liveStop, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stop_id: state.stopId }),
+    });
+  } catch (_) { /* stopping is best effort */ }
+}
+
+function setLiveBadge(kind, text) {
+  const badge = $('live-badge');
+  badge.className = `live-badge ${kind}`;
+  $('live-text').textContent = text;
+}
+
+// -------------------------------------------------------------------- poll
+
+function startPolling() {
+  if (state.timers.stop) return;
+  state.timers.stop = setInterval(refresh, 700);
+}
+
+async function refresh() {
+  if (!state.stopId) return;
+  let payload;
+  try {
+    payload = await getJson(API.live(state.stopId));
+  } catch (_) {
+    return;
+  }
+  if (payload.stop_id !== state.stopId) return;
+
+  const live = payload.live;
+  const recommendation = payload.recommendation || {};
+
+  renderSentence(recommendation);
+  renderNumbers(live, recommendation);
+  renderFacts(live, payload);
+
+  if (live) {
+    state.overlay = live;
+    drawOverlay();
+    syncVideoToMonitor(live);
+    if (state.mode === 'live' && state.monitoring) {
+      const perf = live.performance || {};
+      setLiveBadge('on', `monitoring · ${num(perf.detector_fps_actual, 1)} fps detection`);
+    }
+  } else if (state.monitoring) {
+    setLiveBadge('busy', 'monitor starting…');
+  }
+}
+
+/**
+ * Keeps the playing video near the moment the monitor is reading.
+ *
+ * The boxes come from the monitor's frame position, so if the video element drifts
+ * ahead the annotations lag the picture. Rather than hiding that, we nudge playback
+ * back into alignment whenever the gap grows beyond a second.
+ */
+function syncVideoToMonitor(live) {
+  const video = $('video');
+  if (state.mode !== 'live' || !video || !video.duration) return;
+  const target = live.video_time_s;
+  if (target === null || target === undefined) return;
+  const drift = video.currentTime - target;
+  if (Math.abs(drift) > 1.0) {
+    video.currentTime = target;
+  }
+}
+
+function renderSentence(recommendation) {
+  $('sentence').textContent = recommendation.sentence || '–';
+}
+
+function renderNumbers(live, recommendation) {
+  const numbers = recommendation.numbers || {};
+  $('waiting-count').textContent = num(currentWaiting(live, numbers));
+  $('n-frame').textContent = live ? num(live.people_in_frame) : '–';
+  $('n-arrivals').textContent = num(
+    numbers.arrivals_per_min_displayed ?? numbers.arrivals_per_min,
+    1,
+  );
+  $('n-headway').textContent = numbers.headway_recommended_min
+    ? `${num(numbers.headway_recommended_min)} min`
+    : '–';
+}
+
+/**
+ * The displayed waiting count.
+ *
+ * These reference clips are seconds long and loop, so at the top of every lap the
+ * tracker has to rebuild and the count collapses to zero. Rather than flash 0 several
+ * times a minute, the last settled value is held briefly across a loop. It is never
+ * held for long, and never when there is no monitor at all.
+ */
+const HOLD_AFTER_REBUILD_MS = 2500;
+
+function currentWaiting(live, numbers) {
+  if (!live) return numbers.waiting_passengers;
+
+  const tracked = live.people_in_frame;
+  const waiting = live.people_waiting;
+  const now = Date.now();
+
+  // A lap boundary is visible as: few people tracked, nobody yet classified as waiting,
+  // and we previously had a settled reading.
+  const rebuilding = tracked <= 2 || (waiting === 0 && state.lastWaiting > 0);
+  if (waiting > 0) {
+    state.lastWaiting = waiting;
+    state.lastWaitingAt = now;
+    return waiting;
+  }
+  if (rebuilding && state.lastWaiting > 0 && now - state.lastWaitingAt < HOLD_AFTER_REBUILD_MS) {
+    return state.lastWaiting;
+  }
+  state.lastWaiting = waiting;
+  return waiting;
+}
+
+function renderFacts(live, payload) {
+  const facts = $('facts');
+  facts.innerHTML = '';
+  const add = (text, kind = '') => {
+    const span = document.createElement('span');
+    span.className = `fact ${kind}`;
+    span.textContent = text;
+    facts.appendChild(span);
   };
 
-  section('How demand is measured', [
-    meta.method.perception,
-    meta.method.measurement,
-    meta.method.wait_time,
-  ]);
+  const provenance = payload.provenance || {};
+  if (provenance.kind === 'measured') {
+    add(`arrival rate: ${provenance.confidence} confidence`,
+      provenance.confidence === 'high' ? 'good' : provenance.confidence === 'medium' ? 'warn' : 'bad');
+  } else {
+    add('no measured arrival rate', 'bad');
+  }
 
-  section('What is measured, what is modelled', [
-    'Measured: standing queue, dwell time and arrival rate, from public reference footage processed offline.',
-    'Simulated: scenario demand multipliers applied to those measured base rates. Each multiplier is declared on the scenario button.',
-    'Modelled: wait times, capacity, headways and fleet counts, computed from schedule parameters.',
-    'Not used anywhere: official RTL demand, fleet, timetable or passenger data.',
-  ]);
+  if (live) {
+    const seg = live.segmentation || {};
+    if (seg.enabled) {
+      if (seg.status === 'ok') {
+        const age = seg.last_run_at ? Math.round(Date.now() / 1000 - seg.last_run_at) : null;
+        add(`SAM 3: ${seg.masks} masks${age !== null ? `, ${age}s ago` : ''}`);
+        add(`SAM 3 pass takes ${num(seg.last_duration_s, 0)}s on ${seg.device || 'cpu'}`, 'warn');
+      } else {
+        add(`SAM 3: ${seg.status}`, 'warn');
+      }
+    } else {
+      add('SAM 3: not loaded', 'warn');
+    }
+    const perf = live.performance || {};
+    add(`detection on ${perf.detector_device || 'cpu'} · ${num(perf.detector_ms_per_frame, 0)} ms/frame`);
+  }
 
-  section('Known limitations', meta.method.limitations);
-
-  const coverage = (meta.analysis && meta.analysis.coverage) || {};
-  section('Footage coverage', [
-    `Stops with analysed footage: ${coverage.stops_with_measured_footage ?? '—'} of ${coverage.stops_total ?? '—'}.`,
-    `Evaluable arrival rates — high: ${coverage.confidence_counts?.high ?? 0}, medium: ${coverage.confidence_counts?.medium ?? 0}, low: ${coverage.confidence_counts?.low ?? 0}.`,
-    'A low-confidence rate means the analysed clip was too short, too sparse or too fragmented for a stable estimate. In that case Wayfinder explicitly holds the existing schedule instead of compressing headway on weak evidence.',
-    `Analysis generated: ${meta.analysis.generated_at || 'not yet run'} by ${meta.analysis.generator || 'scripts/analyze_footage.py'}.`,
-  ]);
-
-  section('Disclaimer', meta.disclaimer);
+  const source = payload.provenance?.clip_title;
+  if (source) add(`footage: ${source}`);
 }
 
-// --------------------------------------------------------------------- init
+// ------------------------------------------------------------------ canvas
 
-// Exposed for automated UI checks and deep links (?stop=<id>).
-window.wayfinderSelectStop = (stopId) => selectStop(stopId);
+function drawOverlay() {
+  const live = state.overlay;
+  const video = $('video');
+  const canvas = $('overlay');
+  const stage = $('stage');
+  if (!live || !stage) return;
+
+  const rect = stage.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(rect.width * dpr) || canvas.height !== Math.round(rect.height * dpr)) {
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, rect.width, rect.height);
+
+  // Letterboxed video: work out where the picture actually sits inside the stage.
+  const frame = live.frame_size || [16, 9];
+  const scale = Math.min(rect.width / frame[0], rect.height / frame[1]);
+  const drawW = frame[0] * scale;
+  const drawH = frame[1] * scale;
+  const offsetX = (rect.width - drawW) / 2;
+  const offsetY = (rect.height - drawH) / 2;
+  const px = (nx) => offsetX + nx * drawW;
+  const py = (ny) => offsetY + ny * drawH;
+
+  // SAM 3 masks underneath the boxes.
+  const seg = live.segmentation || {};
+  const overlay = seg.live_overlay;
+  if (overlay?.masks?.length) {
+    ctx.fillStyle = 'rgba(214, 69, 139, 0.28)';
+    ctx.strokeStyle = 'rgba(255, 200, 255, 0.55)';
+    ctx.lineWidth = 1;
+    overlay.masks.forEach((mask) => {
+      (mask.polygons || []).forEach((polygon) => {
+        if (polygon.length < 3) return;
+        ctx.beginPath();
+        polygon.forEach(([nx, ny], index) => {
+          const x = px(nx);
+          const y = py(ny);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      });
+    });
+  }
+
+  // Waiting zone outline, so the counted region is visible.
+  const bounds = live.waiting_zone?.bounds_frac;
+  if (bounds) {
+    ctx.strokeStyle = 'rgba(0, 200, 255, 0.65)';
+    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(
+      px(bounds.x1_frac), py(bounds.y1_frac),
+      (bounds.x2_frac - bounds.x1_frac) * drawW,
+      (bounds.y2_frac - bounds.y1_frac) * drawH,
+    );
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(0, 200, 255, 0.9)';
+    ctx.font = '600 11px Inter, sans-serif';
+    ctx.fillText('waiting zone', px(bounds.x1_frac) + 4, py(bounds.y1_frac) + 13);
+  }
+
+  // Detection boxes: green when waiting, grey when just passing through.
+  (live.tracks || []).forEach((track) => {
+    const [nx1, ny1, nx2, ny2] = track.norm_box;
+    const x = px(nx1);
+    const y = py(ny1);
+    const w = (nx2 - nx1) * drawW;
+    const h = (ny2 - ny1) * drawH;
+
+    ctx.lineWidth = track.waiting ? 2.5 : 1.5;
+    ctx.strokeStyle = track.waiting ? 'rgba(82, 209, 139, 0.95)' : 'rgba(200, 210, 225, 0.55)';
+    ctx.strokeRect(x, y, w, h);
+
+    if (track.waiting && h > 30) {
+      ctx.fillStyle = 'rgba(82, 209, 139, 0.95)';
+      ctx.font = '600 10px Inter, sans-serif';
+      ctx.fillText('waiting', x + 3, y - 4);
+    }
+  });
+
+  $('frame-note').textContent =
+    `${live.tracks?.length || 0} people tracked · ${live.people_in_waiting_zone} inside the zone · ` +
+    `video ${num(live.video_time_s, 1)}s of ${num(live.clip_duration_s, 1)}s`;
+}
+
+// ---------------------------------------------------------------- scenarios
+
+async function setScenario(key) {
+  try {
+    const payload = await getJson(API.scenario, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scenario: key }),
+    });
+    state.meta.current_scenario = payload.scenario;
+    const stops = await getJson(API.stops);
+    state.stops = stops.stops;
+    refresh();
+  } catch (error) {
+    $('sentence').textContent = `Could not change demand setting: ${error.message}`;
+  }
+}
+
+// -------------------------------------------------------------------- about
+
+function buildAbout() {
+  const body = $('about-body');
+  const meta = state.meta;
+  body.innerHTML = '';
+
+  const p = (text) => body.appendChild(Object.assign(document.createElement('p'), { textContent: text }));
+  const h = (text) => body.appendChild(Object.assign(document.createElement('h3'), { textContent: text }));
+  const ul = (items) => {
+    const list = document.createElement('ul');
+    items.forEach((item) => list.appendChild(Object.assign(document.createElement('li'), { textContent: item })));
+    body.appendChild(list);
+  };
+
+  p(meta.disclaimer);
+
+  h('What the camera measures');
+  ul([
+    'People in view: detected by YOLOv8 in each frame, continuously while monitoring is on.',
+    'People waiting: tracked over time and counted only if they are standing still inside the waiting area.',
+    'Arriving per minute: counted from people actually entering the waiting area over the last minute of footage.',
+  ]);
+
+  h('How often each model runs');
+  ul([
+    'Detection: about 5 times a second, roughly 30-50 ms per frame on CPU (the live badge shows the rate actually achieved).',
+    'SAM 3 segmentation: continuously, but one pass takes several seconds on CPU, so the masks you see are a few seconds old and refresh in the background.',
+    'Headway advice: from the recorded analysis of this stop, not from the live counts, because a schedule decision needs minutes of data.',
+  ]);
+
+  h('Limits you should know');
+  ul(meta.method.limitations);
+
+  h('Where the footage comes from');
+  p(meta.footage_note || 'Public reference footage from other cities, not RTL cameras.');
+}
 
 document.addEventListener('DOMContentLoaded', boot);

@@ -24,6 +24,16 @@ class PersonDetector:
         self.model = YOLO(model_weight)
         self.target_class_id = 0  # COCO class 0 = person
 
+    @property
+    def device_label(self) -> str:
+        """Where inference actually ran, for honest reporting in the UI."""
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:  # pragma: no cover
+            return "unknown"
+
     def detect_frame(self, frame: np.ndarray) -> Dict[str, Any]:
         """Runs person detection on one BGR frame. Returns boxes, confidences, count."""
         h, w = frame.shape[:2]

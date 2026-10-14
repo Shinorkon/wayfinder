@@ -161,6 +161,32 @@ class SAM3Masker:
             ),
         }
 
+    def mask_polygons(self, segment_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Returns the raw polygons for client-side drawing, in normalised coordinates.
+
+        The live monitor streams these to the browser so SAM 3 masks appear over the
+        playing video without the server having to encode a JPEG per update.
+        """
+        w, h = segment_results.get("image_size", [1, 1])
+        out: List[Dict[str, Any]] = []
+        for prompt_data in segment_results.get("results", []):
+            for mask in prompt_data.get("masks", []):
+                polys = []
+                for poly in mask.get("polygons", []):
+                    polys.append(
+                        [[round(pt[0] / w, 5), round(pt[1] / h, 5)] for pt in poly]
+                    )
+                out.append(
+                    {
+                        "prompt": prompt_data.get("prompt"),
+                        "score": mask.get("score"),
+                        "area_frac": mask.get("area_frac"),
+                        "polygons": polys,
+                    }
+                )
+        return out
+
     def render_overlay(
         self,
         frame: np.ndarray,

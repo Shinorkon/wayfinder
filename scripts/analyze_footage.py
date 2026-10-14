@@ -69,6 +69,9 @@ def build_index(
                 "queue_series": art["queue_series"],
                 "limitations": art["limitations"],
                 "analysis_method": art["analysis"]["method"],
+                # The waiting-zone raster is stored so the live monitor reuses the exact
+                # region the offline measurement used, instead of deriving its own.
+                "waiting_zone": art.get("waiting_zone", {}),
             }
             provenance = {
                 "clip": clip,

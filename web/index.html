@@ -3,218 +3,87 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Wayfinder | Greater Malé RTL stop demand &amp; frequency modelling</title>
+  <title>Wayfinder — live bus stop monitoring</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b6bcb'/%3E%3Ctext x='16' y='22' font-family='sans-serif' font-size='15' font-weight='700' fill='white' text-anchor='middle'%3ER%3C/text%3E%3C/svg%3E">
-
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="mode-live">
 
-  <a class="skip-link" href="#inspector">Skip to stop detail</a>
-
-  <header class="app-bar">
-    <div class="app-brand">
-      <div class="brand-badge">RTL</div>
-      <div class="brand-text">
-        <h1>Wayfinder</h1>
-        <p>Stop demand measurement &amp; fleet frequency modelling &middot; Greater Malé</p>
-      </div>
+  <header class="bar">
+    <div class="brand">
+      <span class="logo">RTL</span>
+      <strong>Wayfinder</strong>
+      <span class="tagline">live bus stop monitoring</span>
     </div>
 
-    <div class="scenario-controls" role="group" aria-label="Demand scenario">
-      <span class="ctrl-label" id="scenario-label">Demand scenario</span>
-      <div class="pill-row" id="scenario-pills" role="radiogroup" aria-labelledby="scenario-label">
-        <!-- populated from /api/meta -->
-      </div>
+    <label class="field">
+      <span>Demand</span>
+      <select id="scenario"></select>
+    </label>
+
+    <div class="modes" role="tablist" aria-label="View mode">
+      <button class="mode active" id="mode-live" role="tab" aria-selected="true" type="button">Live</button>
+      <button class="mode" id="mode-snap" role="tab" aria-selected="false" type="button">Snapshots</button>
     </div>
 
-    <div class="app-actions">
-      <button class="ghost-btn" id="btn-method" type="button">Method &amp; limits</button>
-      <button class="ghost-btn" id="btn-theme" type="button" aria-pressed="false">Dark</button>
-      <div class="live-clock" id="live-clock" aria-live="off">--:--:-- MVT</div>
-    </div>
+    <button class="info-btn" id="info-btn" type="button" aria-label="About this data">i</button>
   </header>
 
-  <section class="status-strip" aria-label="Data provenance">
-    <span class="prov-chip" id="prov-kind">loading…</span>
-    <span class="prov-text" id="prov-disclosure"></span>
-  </section>
+  <main>
+    <!-- The one thing that matters: the camera, with boxes drawn on it. -->
+    <section class="viewer">
+      <div class="stage" id="stage">
+        <video id="video" autoplay loop muted playsinline></video>
+        <img id="snapshot" alt="" hidden>
+        <canvas id="overlay" aria-hidden="true"></canvas>
 
-  <section class="kpi-strip" aria-label="Network summary">
-    <div class="kpi-item">
-      <span class="kpi-title">Mean modelled wait &mdash; timetable</span>
-      <div class="kpi-metric">
-        <strong id="kpi-baseline-wait">—</strong><span class="unit">min</span>
-      </div>
-      <span class="kpi-note">Welch: H/2 × (1 + CV²)</span>
-    </div>
-    <div class="kpi-item">
-      <span class="kpi-title">Mean modelled wait &mdash; recommended</span>
-      <div class="kpi-metric">
-        <strong id="kpi-optimized-wait">—</strong><span class="unit">min</span>
-      </div>
-      <span class="kpi-note badge" id="kpi-wait-delta">—</span>
-    </div>
-    <div class="kpi-item">
-      <span class="kpi-title">Measured inflow (all measured stops)</span>
-      <div class="kpi-metric">
-        <strong id="kpi-inflow">—</strong><span class="unit">pax/min</span>
-      </div>
-      <span class="kpi-note" id="kpi-inflow-note">—</span>
-    </div>
-    <div class="kpi-item">
-      <span class="kpi-title">Stops with evaluable measurement</span>
-      <div class="kpi-metric">
-        <strong id="kpi-coverage">—</strong><span class="unit" id="kpi-coverage-unit">stops</span>
-      </div>
-      <span class="kpi-note" id="kpi-confidence">—</span>
-    </div>
-  </section>
+        <div class="live-badge" id="live-badge"><span class="dot"></span><span id="live-text">starting…</span></div>
 
-  <main class="split-layout">
-    <section class="map-pane" aria-label="Network map">
-      <div class="pane-header">
-        <div class="pane-title">Greater Malé network &mdash; OpenStreetMap road geometry</div>
-        <div class="route-legend" id="route-legend"></div>
+        <div class="count-badge">
+          <span class="count" id="waiting-count">–</span>
+          <span class="count-label">people waiting</span>
+        </div>
+
+        <div class="stage-foot">
+          <span id="frame-note">–</span>
+        </div>
       </div>
-      <div class="map-wrapper">
-        <div id="osm-map"></div>
+
+      <div class="readout">
+        <p class="sentence" id="sentence">Loading…</p>
+        <div class="numbers">
+          <div><b id="n-frame">–</b><span>people in view</span></div>
+          <div><b id="n-arrivals">–</b><span>arriving / min</span></div>
+          <div><b id="n-headway">–</b><span>run buses every</span></div>
+        </div>
+        <div class="facts" id="facts"></div>
       </div>
     </section>
 
-    <section class="inspector-pane" id="inspector" aria-label="Stop detail">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-heading">
-            <span class="eyebrow" id="stop-zone">—</span>
-            <h2 id="stop-name">Select a stop</h2>
-            <span class="eyebrow" id="stop-routes">—</span>
-          </div>
-          <span class="status-pill" id="stop-status">—</span>
-        </div>
-        <div id="stop-warnings" class="warn-list"></div>
+    <aside class="side">
+      <div class="side-head">
+        <h1 id="stop-name">Loading…</h1>
+        <p id="stop-sub">–</p>
       </div>
 
-      <div class="card">
-        <div class="card-header">
-          <h3>Measured demand</h3>
-          <span class="card-sub" id="measurement-sub">—</span>
-        </div>
-        <div class="metric-grid">
-          <div class="metric-cell">
-            <span class="m-label">Arrival rate (model input)</span>
-            <span class="m-value" id="val-rate">—</span>
-            <span class="m-sub" id="val-rate-sub">—</span>
-          </div>
-          <div class="metric-cell">
-            <span class="m-label">Standing queue (measured)</span>
-            <span class="m-value" id="val-queue-base">—</span>
-            <span class="m-sub" id="val-queue-base-sub">—</span>
-          </div>
-          <div class="metric-cell">
-            <span class="m-label">Live queue estimate</span>
-            <span class="m-value" id="val-queue">—</span>
-            <span class="m-sub" id="val-queue-sub">—</span>
-          </div>
-          <div class="metric-cell">
-            <span class="m-label">Mean dwell (measured)</span>
-            <span class="m-value" id="val-dwell">—</span>
-            <span class="m-sub" id="val-dwell-sub">—</span>
-          </div>
-        </div>
-        <div class="spark-wrap">
-          <div class="spark-head">
-            <span>Measured standing queue over the analysed clip</span>
-            <span class="muted" id="spark-note"></span>
-          </div>
-          <svg id="queue-spark" class="spark" viewBox="0 0 320 64" preserveAspectRatio="none" role="img"
-               aria-label="Standing queue over time"></svg>
-        </div>
-        <details class="details">
-          <summary>Provenance of these measurements</summary>
-          <div class="prov-body" id="prov-body"></div>
-        </details>
-      </div>
+      <div class="map-wrap"><div id="map"></div></div>
 
-      <div class="card">
-        <div class="card-header">
-          <h3>Frequency model</h3>
-          <span class="card-sub" id="dispatch-sub">—</span>
-        </div>
-        <div class="metric-grid">
-          <div class="metric-cell highlight">
-            <span class="m-label">Headway</span>
-            <span class="m-value stacked">
-              <span class="crossed" id="val-headway-base">—</span>
-              <span class="arrow" aria-hidden="true">&rarr;</span>
-              <span class="new" id="val-headway-rec">—</span>
-            </span>
-            <span class="m-sub" id="val-headway-sub">—</span>
-          </div>
-          <div class="metric-cell">
-            <span class="m-label">Vehicle</span>
-            <span class="m-value" id="val-bus">—</span>
-            <span class="m-sub" id="val-bus-sub">—</span>
-          </div>
-          <div class="metric-cell">
-            <span class="m-label">Offered / demanded service</span>
-            <span class="m-value" id="val-service">—</span>
-            <span class="m-sub" id="val-service-sub">—</span>
-          </div>
-          <div class="metric-cell">
-            <span class="m-label">Buses required</span>
-            <span class="m-value" id="val-buses">—</span>
-            <span class="m-sub" id="val-buses-sub">—</span>
-          </div>
-        </div>
-        <div class="directive" id="directive-box">
-          <div class="directive-title">Computed directive</div>
-          <p id="directive-text">—</p>
-        </div>
-        <details class="details">
-          <summary>Reasoning steps (generated from the model inputs)</summary>
-          <div class="cot-list" id="cot-list"></div>
-        </details>
-        <div class="advisory-row">
-          <button class="btn" id="btn-advisory" type="button">Ask DeepSeek for advisory commentary</button>
-          <span class="muted" id="advisory-note">Optional. The numbers above never come from a language model.</span>
-        </div>
-        <div class="advisory" id="advisory-box" hidden></div>
+      <div class="side-foot">
+        <p class="small" id="camera-note">–</p>
+        <button class="link-btn" id="about-btn" type="button">What am I looking at?</button>
       </div>
-
-      <div class="card">
-        <div class="card-header">
-          <h3>Reference footage</h3>
-          <div class="view-switcher" role="tablist" aria-label="Overlay layer">
-            <button class="view-btn active" id="btn-view-video" role="tab" aria-selected="true" type="button">Video</button>
-            <button class="view-btn" id="btn-view-detections" role="tab" aria-selected="false" type="button">Detections</button>
-            <button class="view-btn" id="btn-view-segmentation" role="tab" aria-selected="false" type="button">SAM 3</button>
-            <button class="view-btn" id="btn-view-hybrid" role="tab" aria-selected="false" type="button">Hybrid</button>
-          </div>
-        </div>
-        <div class="media-container">
-          <video id="stop-video" class="media-element" autoplay loop muted playsinline></video>
-          <img id="stop-cv-image" class="media-element" alt="" style="display:none">
-          <div class="media-cap" id="media-cap">—</div>
-        </div>
-        <div class="media-foot">
-          <span id="footage-line">—</span>
-        </div>
-      </div>
-    </section>
+    </aside>
   </main>
 
-  <dialog id="method-modal" class="modal">
-    <div class="modal-header">
-      <h2>Method and limits</h2>
-      <button class="close-btn" id="btn-close-method" type="button" aria-label="Close">&times;</button>
-    </div>
-    <div class="modal-body" id="method-body">loading…</div>
+  <dialog id="about" class="sheet">
+    <h2>What am I looking at?</h2>
+    <div id="about-body"></div>
+    <form method="dialog"><button class="primary">Close</button></form>
   </dialog>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"

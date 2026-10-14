@@ -89,7 +89,7 @@ def draw_waiting_zone(img: np.ndarray, bounds_frac: Optional[Dict[str, float]]) 
     return out
 
 
-def extract_frame(clip_path: str, at_fraction: float = 0.4) -> Tuple[np.ndarray, float]:
+def extract_frame(clip_path: str, at_fraction: float = 0.0) -> Tuple[np.ndarray, float]:
     """Grabs a representative frame. Returns (frame, timestamp_seconds)."""
     cap = cv2.VideoCapture(clip_path)
     if not cap.isOpened():
@@ -112,7 +112,7 @@ def render_keyframes(
     sam3=None,
     analysis: Optional[Dict[str, Any]] = None,
     source_meta: Optional[Dict[str, Any]] = None,
-    at_fraction: float = 0.4,
+    at_fraction: float = 0.0,
     max_width: int = 1600,
 ) -> Dict[str, Any]:
     """
@@ -121,6 +121,10 @@ def render_keyframes(
     ``analysis`` is the serialised stop_analysis artifact, used for the waiting-zone
     overlay and for the telemetry line in the banner, so the picture and the numbers
     come from the same run.
+
+    The frame defaults to the START of the clip because the live monitor also starts
+    there: the moment a stop is opened, the drawn boxes and the playing picture then
+    show the same instant instead of being seconds apart.
     """
     os.makedirs(out_dir, exist_ok=True)
     frame, ts = extract_frame(clip_path, at_fraction)
