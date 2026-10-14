@@ -1,0 +1,18 @@
+# Wayfinder runtime dependencies.
+# Versions are the ones this build was verified against (Python 3.14).
+# GPU: install the CUDA build of torch yourself; the code falls back to CPU and says so.
+
+fastapi==0.132.1
+uvicorn==0.41.0
+pydantic==2.12.5
+httpx==0.28.1
+ultralytics==8.4.177
+transformers==5.12.1
+torch==2.12.1
+torchvision==0.27.1
+opencv-python==5.0.0.93
+numpy==2.4.2
+scipy==1.18.0
+pillow==12.3.0
+pytest==9.0.2
+python-multipart==0.0.22

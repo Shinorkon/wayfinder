@@ -1,0 +1,64 @@
+{
+  "_comment": "Provenance for every clip in data/footage. These are public reference videos used to test the detector on real crowds. They are NOT RTL buses, NOT Malé, and NOT the operator's CCTV. The UI must display this so nobody mistakes reference footage for network telemetry.",
+  "clips": {
+    "01_bus_stop_people_pexels_1601542_1080p.mp4": {
+      "title": "Queen Square bus station (Liverpool, UK)",
+      "city": "Liverpool, United Kingdom",
+      "source": "Pexels",
+      "source_url": "https://www.pexels.com/video/people-at-a-bus-stop-1601542/",
+      "license": "Pexels License",
+      "license_url": "https://www.pexels.com/license/",
+      "redistributable": true,
+      "used_for": "Waiting-zone occupancy and dwell measurement at a real bus stop.",
+      "disclosure": "Reference footage from Liverpool. Not Malé, not RTL."
+    },
+    "02_cctv_elevated_street_night_MOT17-04_540p.mp4": {
+      "title": "Elevated street, night (MOT17-04 preview)",
+      "city": "Unknown (MOTChallenge sequence)",
+      "source": "MOTChallenge (MOT17)",
+      "source_url": "https://motchallenge.net/vis/MOT17-04-SDP",
+      "license": "CC BY-NC-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+      "redistributable": false,
+      "used_for": "Low-light, low-angle pedestrian flow.",
+      "disclosure": "Non-commercial research footage. Not Malé, not RTL. Not redistributable.",
+      "citation": "Milan et al. 2016, MOT16/17"
+    },
+    "03_cctv_station_concourse_MOT20-01_540p.mp4": {
+      "title": "Station concourse (MOT20-01 preview)",
+      "city": "Unknown (MOTChallenge sequence)",
+      "source": "MOTChallenge (MOT20)",
+      "source_url": "https://motchallenge.net/vis/MOT20-01",
+      "license": "CC BY-NC-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+      "redistributable": false,
+      "used_for": "Dense crowd stress test for the tracker.",
+      "disclosure": "Non-commercial research footage. Not Malé, not RTL. Not redistributable.",
+      "citation": "Dendorfer et al. 2020, MOT20"
+    },
+    "04_cctv_station_concourse_MOT20-02_540p.mp4": {
+      "title": "Station concourse, growing crowd (MOT20-02 preview)",
+      "city": "Unknown (MOTChallenge sequence)",
+      "source": "MOTChallenge (MOT20)",
+      "source_url": "https://motchallenge.net/vis/MOT20-02",
+      "license": "CC BY-NC-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+      "redistributable": false,
+      "used_for": "Crowd growth over a longer window.",
+      "disclosure": "Non-commercial research footage. Not Malé, not RTL. Not redistributable.",
+      "citation": "Dendorfer et al. 2020, MOT20"
+    },
+    "05_cctv_outdoor_plaza_crowd_MOT20-03_440p.mp4": {
+      "title": "Outdoor plaza crowd at night (MOT20-03 preview)",
+      "city": "Unknown (MOTChallenge sequence)",
+      "source": "MOTChallenge (MOT20)",
+      "source_url": "https://motchallenge.net/vis/MOT20-03",
+      "license": "CC BY-NC-SA 3.0",
+      "license_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+      "redistributable": false,
+      "used_for": "Small figures at low resolution - the hardest case for this detector.",
+      "disclosure": "Non-commercial research footage. Not Malé, not RTL. Not redistributable.",
+      "citation": "Dendorfer et al. 2020, MOT20"
+    }
+  }
+}
