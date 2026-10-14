@@ -28,9 +28,22 @@ yolov8n.pt
 data/footage/*.mp4
 data/footage/*.webm
 
-# Generated analysis (data/analysis/) and rendered keyframes (output/keyframes/) ARE
-# committed on purpose: they are measured evidence, and the dashboard is meaningless
-# without them. Regenerate with: python3 scripts/analyze_footage.py
+# Generated analysis and rendered keyframes
+#
+# output/keyframes/01_* (Pexels, redistributable) IS committed: it is the measured
+# evidence and the dashboard is meaningless without it.
+#
+# The other four keyframe sets are RENDERS OF MOTChallenge footage. Those clips are
+# CC BY-NC-SA 3.0 (non-commercial, no redistribution), so committing derived frames
+# would redistribute the material just as surely as committing the videos. They are
+# excluded; regenerate locally with: python3 scripts/analyze_footage.py
+output/keyframes/02_*/
+output/keyframes/03_*/
+output/keyframes/04_*/
+output/keyframes/05_*/
+
+# data/analysis/ records measurements only - numbers, not imagery - so it is committed
+# for all clips.
 
 # Segmentation weights (download-on-first-use, AGPL-3.0 - see THIRD_PARTY.md)
 *-seg.pt

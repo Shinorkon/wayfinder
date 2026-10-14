@@ -27,9 +27,21 @@ the disclosure string from it is burned into every rendered keyframe.
 * **NC** — non-commercial use only. Do not use these clips in a commercial product or service.
 * **SA** — derivative works must carry the same licence.
 
-The MOT clips are included as a **local evaluation aid for this prototype**. Before any
-public or commercial release, delete `data/footage/02_*` through `05_*` and regenerate the
-analysis:
+### What is and is not committed
+
+Neither the clips nor **renders made from them** are committed:
+
+- `data/footage/*.mp4` — gitignored. The MOT clips cannot be redistributed.
+- `output/keyframes/02_*` … `05_*` — gitignored. These are JPEG renders of MOT footage, so
+  committing them would redistribute the material just as surely as the videos.
+- `output/keyframes/01_*` — committed, because clip 01 is Pexels-licensed.
+- `data/analysis/*.json` — committed for all clips. These contain measurements (numbers,
+  queues, confidence grades), not imagery.
+
+Regenerate everything locally with `python3 scripts/analyze_footage.py`.
+
+Before any public or commercial release, delete `data/footage/02_*` through `05_*` and
+regenerate the analysis:
 
 ```bash
 rm data/footage/0[2-5]_*.mp4
