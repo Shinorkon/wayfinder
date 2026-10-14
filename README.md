@@ -201,7 +201,8 @@ wayfinder/
 ├── scripts/
 │   ├── analyze_footage.py       # offline pipeline: footage -> measurements -> keyframes
 │   └── verify_pipeline.py       # end-to-end verification with real assertions
-├── tests/                       # pytest suite (integrity, engine invariants, API, CV)
+├── tests/                       # integrity, engine invariants, API, CV, and browser-level
+│                                # UI tests that catch stacking/visibility regressions
 ├── requirements.txt
 ├── run.sh
 ├── LICENSE

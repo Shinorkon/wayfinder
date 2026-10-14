@@ -21,3 +21,7 @@ scipy==1.18.0
 pillow==12.3.0
 pytest==9.0.2
 python-multipart==0.0.22
+
+# UI regression tests (tests/test_ui_rendering.py). Optional: those tests skip when a
+# browser is unavailable. Set WAYFINDER_SKIP_UI_TESTS=1 to skip them explicitly.
+pytest-playwright

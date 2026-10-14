@@ -180,14 +180,25 @@ function applySnapshotFallback(stop) {
   } else {
     image.removeAttribute('src');
   }
-  // The snapshot layer is only ever visible in Snapshots mode; leaving it loaded under
-  // the live video made the pre-rendered banner bleed through the picture.
-  const snapMode = state.mode === 'snap';
-  image.hidden = !snapMode;
-  $('video').hidden = snapMode;
+  // Re-apply visibility so a freshly loaded still frame can never appear over the live
+  // video. Deliberately not setMode(), which would also kick off monitoring again.
+  applyLayerVisibility();
 }
 
 // ------------------------------------------------------------------- modes
+
+/**
+ * Decides which media layer is visible. Live mode plays the video with the canvas
+ * overlay on top; Snapshots mode shows the pre-rendered still frame.
+ *
+ * This is the ONLY place that sets these two flags, because doing it in two places is
+ * what let a still frame sit on top of the playing video unnoticed.
+ */
+function applyLayerVisibility() {
+  const snapMode = state.mode === 'snap';
+  $('snapshot').hidden = !snapMode;
+  $('video').hidden = snapMode;
+}
 
 function setMode(mode) {
   state.mode = mode;
@@ -198,10 +209,7 @@ function setMode(mode) {
   $('mode-live').setAttribute('aria-selected', String(mode === 'live'));
   $('mode-snap').setAttribute('aria-selected', String(mode === 'snap'));
 
-  $('video').hidden = mode !== 'live';
-  // In live mode the canvas overlay draws the boxes; the pre-rendered snapshot JPEG
-  // already has boxes and a provenance banner burned in, so it must not be visible.
-  $('snapshot').hidden = mode !== 'snap';
+  applyLayerVisibility();
   if (mode === 'snap') stopMonitoring();
   else startMonitoring();
 }

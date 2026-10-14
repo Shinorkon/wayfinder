@@ -19,6 +19,11 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* An author rule like `.stage img { display: block }` has the same specificity as the
+   browser's `[hidden] { display: none }` and wins by source order, which silently defeats
+   the `hidden` attribute. This guarantees `hidden` always hides. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 
 body {
@@ -124,8 +129,12 @@ main {
   height: 100%;
   object-fit: contain;
   display: block;
+  z-index: 1;
 }
-.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* The playing video and the still keyframe are alternatives, never stacked: whichever is
+   visible must sit above the other so a stale frame can never cover the live picture. */
+.stage video { z-index: 2; }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
 
 .live-badge {
   position: absolute;
