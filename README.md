@@ -23,6 +23,42 @@ The perception stack runs offline over each clip in `data/footage/`:
 | Waiting-zone derivation | `src/cv/stop_analysis.py` | The region where tracked people loiter (dwell-density heatmap) |
 | Measurement | `src/cv/stop_analysis.py` | Arrival rate (pax/min), standing queue, dwell time, time series |
 
+### GPU support
+
+Device selection is automatic and reported. On a CUDA machine the model is moved to the
+GPU with FP16 and warmed up before the first frame; on CPU it stays on the smallest
+weights, because per-frame latency is the binding constraint there.
+
+Model size is chosen from **free VRAM**, not guessed:
+
+| Free VRAM | Model | Parameters |
+|---|---|---|
+| ≥ 10 GB | yolo11l-seg | 27.7M |
+| ≥ 6 GB | yolo11m-seg | 22.4M |
+| ≥ 3 GB | yolo11s-seg | 10.1M |
+| any CUDA | yolov8s-seg | 11.8M |
+| CPU | yolov8n-seg | 3.4M |
+
+Every model in that ladder is tens of millions of parameters, so GPU memory is never the
+real constraint on a modern card — latency is. A fallback ladder loads the next size down
+if the chosen model cannot be allocated.
+
+`GET /api/device` reports what was detected and why. It distinguishes three cases: CUDA
+usable, no GPU at all, and **GPU present but not passed through to the process** — the last
+being invisible to `torch.cuda.is_available()` alone. The dashboard shows this too, so an
+unusable GPU is visible rather than quietly absorbed:
+
+```
+```
+gpu_present: true
+gpu_name_from_host: NVIDIA GeForce RTX 4050 Laptop GPU
+cuda_available: false
+reason: "an NVIDIA GPU is present and the driver is loaded, but no /dev/nvidia* device
+ nodes are available to this process - the container/sandbox was not given the GPU
+ device. Expose it (docker --gpus all / device cgroup, or recreate the nodes with
+ CAP_MKNOD) and the same code will select the GPU automatically."
+```
+
 ### Why the live path uses a YOLO segmentation model, not SAM 3
 
 Measured on this machine's CPU (540p frames, `imgsz=640`, person class only):

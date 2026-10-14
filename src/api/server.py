@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from src.cv.live_monitor import MonitorHub
-from src.cv.segmenter import YoloSegmenter
+from src.cv.segmenter import device_report, load_segmenter, pick_weights
 from src.cv.stop_analysis import zone_mask_from_rows
 from src.intelligence.deepseek_agent import DeepSeekDispatchAgent
 from src.intelligence.recommendation import live_recommendation, plain_recommendation
@@ -74,10 +74,11 @@ def _segmenter_factory():
     """
     The fast per-frame model: a YOLO segmentation network.
 
-    It returns boxes and masks from one forward pass, which is what makes per-frame
-    masks affordable here. SAM 3 would need ~14 s per frame on this CPU.
+    Returns boxes and masks from one forward pass, which is what makes per-frame masks
+    affordable. load_segmenter() picks the weights from the detected device (free VRAM on
+    a GPU, smallest weights on CPU) and records why, so the UI can report it.
     """
-    return YoloSegmenter()
+    return load_segmenter()
 
 
 def _deep_pass_factory():
@@ -119,6 +120,26 @@ def _clip_path(stop: Dict[str, Any]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------
+
+
+@app.get("/api/device")
+def device() -> Dict[str, Any]:
+    """
+    Reports the accelerator actually available, the model chosen for it, and - when a GPU
+    is present but unusable - the specific reason, so it can be fixed rather than guessed.
+    """
+    report = device_report()
+    weights, why = pick_weights(report)
+    return {
+        **report,
+        "chosen_weights": weights,
+        "why": why,
+        "note": (
+            "Model size is chosen from free VRAM. Every model in the ladder is under 30M "
+            "parameters, so GPU memory is never the constraint on a modern laptop GPU; "
+            "per-frame latency is."
+        ),
+    }
 
 
 @app.get("/api/health")
@@ -169,7 +190,9 @@ def meta() -> Dict[str, Any]:
             "detector_ms_note": "measured live by the monitor; see the performance block in /api/live/{stop_id}",
             "live": {
                 "detector_target_fps": 5.0,
-                "segmentation_model": "yolov8n-seg",
+                "device": device_report().get("device"),
+                "device_reason": device_report().get("reason"),
+                "segmentation_model": pick_weights()[0],
                 "segmentation": (
                     "Masks and boxes come from one YOLO segmentation forward pass, roughly "
                     "40 ms per frame on CPU, so masks refresh with the counts. SAM 3 is "
@@ -325,6 +348,7 @@ def live_state(stop_id: str) -> Dict[str, Any]:
         "stop_name": stop.get("name"),
         "live": live,
         "monitoring": live is not None and live.get("running", False),
+        "device": device_report(),
         "recommendation": recommendation,
         "provenance": state.provenance,
         "active_monitors": monitor_hub.active(),
@@ -367,6 +391,8 @@ def live_start(req: MonitorRequest) -> Dict[str, Any]:
         "stop_id": req.stop_id,
         "fps": req.fps,
         "segmentation_model": getattr(segmenter, "name", None),
+        "segmentation_device": getattr(segmenter, "device", None),
+        "device_reason": getattr(segmenter, "device_note", None),
         "segmentation": segmenter is not None,
         "deep_pass": req.deep_pass_interval_s > 0,
         "zone_calibrated": req.stop_id in ZONE_MASKS,

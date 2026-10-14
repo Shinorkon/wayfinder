@@ -88,3 +88,86 @@ def test_deep_pass_loader_prefers_fast_model():
     assert model is not None
     # Default must never be SAM 3: it cannot run per frame.
     assert getattr(model, "is_sam3", False) is False
+
+
+# ---------------------------------------------------------------------------
+# Device and model selection
+# ---------------------------------------------------------------------------
+
+from src.cv.segmenter import (  # noqa: E402
+    CPU_WEIGHTS,
+    WEIGHT_TIERS,
+    device_report,
+    pick_weights,
+)
+
+
+def test_device_report_has_a_reason_when_cuda_is_unusable():
+    report = device_report()
+    assert "cuda_available" in report
+    assert report["device"] in {"cpu", "cuda"}
+    if not report["cuda_available"]:
+        # A bare "False" is not actionable; the reason must say what to fix.
+        assert report["reason"], "an unusable GPU must come with an explanation"
+
+
+def test_device_report_names_a_real_gpu_when_cuda_works():
+    report = device_report()
+    if report["cuda_available"]:
+        assert report["gpu_name"]
+        assert report["total_vram_gb"] and report["total_vram_gb"] > 0
+        assert report["free_vram_gb"] is not None
+
+
+def test_cpu_selection_stays_small():
+    weights, why = pick_weights({"cuda_available": False, "reason": "no device"})
+    assert weights == CPU_WEIGHTS
+    assert "CPU" in why
+
+
+def test_gpu_selection_spends_available_vram():
+    """A big GPU must get a bigger model, not the CPU default."""
+    small, _ = pick_weights({"cuda_available": True, "free_vram_gb": 4.0, "gpu_name": "X", "total_vram_gb": 6.0})
+    large, why = pick_weights({"cuda_available": True, "free_vram_gb": 11.0, "gpu_name": "RTX 4050", "total_vram_gb": 12.0})
+    assert small != CPU_WEIGHTS
+    assert large != CPU_WEIGHTS
+    assert large != small, "more VRAM should select a larger model"
+    assert "RTX 4050" in why
+
+
+def test_gpu_selection_is_monotonic_in_vram():
+    picks = []
+    for free in (0.5, 1.0, 3.5, 4.0, 7.0, 11.0, 24.0):
+        weights, _ = pick_weights(
+            {"cuda_available": True, "free_vram_gb": free, "gpu_name": "g", "total_vram_gb": free + 1}
+        )
+        picks.append(weights)
+    # A bigger card must never get a smaller model than a smaller card.
+    order = [w for _m, w, _l in WEIGHT_TIERS] + [CPU_WEIGHTS]
+    ranks = [order.index(p) if p in order else -1 for p in picks]
+    assert all(r >= 0 for r in ranks), ranks
+    assert ranks == sorted(ranks, reverse=True), f"selection not monotonic: {picks}"
+
+
+def test_unknown_free_vram_still_returns_a_gpu_model():
+    weights, _ = pick_weights({"cuda_available": True, "free_vram_gb": None, "gpu_name": "g"})
+    assert weights != CPU_WEIGHTS
+
+
+def test_all_ladder_models_are_small_enough_to_be_cheap():
+    """
+    Every model in the ladder is tens of millions of parameters. Documented here because
+    the premise of the ladder is that VRAM capacity is never the constraint.
+    """
+    ladder = {w for _m, w, _l in WEIGHT_TIERS} | {CPU_WEIGHTS}
+    assert "yolov8n-seg.pt" in ladder, "the CPU default must be in the ladder"
+    assert "yolo11l-seg.pt" in ladder, "the largest GPU tier must be in the ladder"
+    assert all(w.endswith("-seg.pt") for w in ladder)
+    assert len(ladder) == len(WEIGHT_TIERS) + 1, "ladder must not repeat a model"
+
+
+def test_segmenter_honours_an_explicit_device():
+    model = YoloSegmenter(weights=CPU_WEIGHTS, device="cpu", half=False)
+    assert model.device == "cpu"
+    assert model.half is False
+    assert model.warmup_ok is True

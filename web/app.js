@@ -384,6 +384,12 @@ function renderFacts(live, payload) {
       add('segmentation: off', 'warn');
     }
     add(`boxes + masks on ${perf.detector_device || 'cpu'} · ${num(perf.detector_ms_per_frame, 0)} ms/frame`);
+    const dev = payload.device || {};
+    if (dev.cuda_available) {
+      add(`${dev.gpu_name} · ${num(dev.free_vram_gb, 1)} GB free`, 'good');
+    } else if (dev.gpu_present) {
+      add(`${dev.gpu_name_from_host} detected but not usable by this process`, 'warn');
+    }
     const deep = live.deep_pass || {};
     if (deep.enabled) {
       add(`SAM 3 deep pass every ${num(deep.interval_s, 0)}s (${num(deep.last_duration_s, 1)}s each)`, 'warn');
