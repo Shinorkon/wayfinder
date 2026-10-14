@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from src.cv.live_monitor import MonitorHub
+from src.cv.segmenter import YoloSegmenter
 from src.cv.stop_analysis import zone_mask_from_rows
 from src.intelligence.deepseek_agent import DeepSeekDispatchAgent
 from src.intelligence.recommendation import live_recommendation, plain_recommendation
@@ -69,8 +70,18 @@ deepseek_agent = DeepSeekDispatchAgent()
 # Continuous monitoring
 # ---------------------------------------------------------------------------
 
-def _sam3_factory():
-    """Loads SAM 3 lazily. Returns None if the weights are not present."""
+def _segmenter_factory():
+    """
+    The fast per-frame model: a YOLO segmentation network.
+
+    It returns boxes and masks from one forward pass, which is what makes per-frame
+    masks affordable here. SAM 3 would need ~14 s per frame on this CPU.
+    """
+    return YoloSegmenter()
+
+
+def _deep_pass_factory():
+    """Optional slow SAM 3, used only when explicitly requested for comparison."""
     from src.cv.sam3_masker import SAM3Masker
 
     return SAM3Masker.get_instance()
@@ -78,7 +89,8 @@ def _sam3_factory():
 
 monitor_hub = MonitorHub(
     detector_factory=lambda: __import__("src.cv.detector", fromlist=["PersonDetector"]).PersonDetector(),
-    sam3_factory=_sam3_factory,
+    segmenter_factory=_segmenter_factory,
+    deep_pass_factory=_deep_pass_factory,
 )
 
 # Waiting-zone raster per stop, reused from the offline analysis so live and offline
@@ -157,11 +169,19 @@ def meta() -> Dict[str, Any]:
             "detector_ms_note": "measured live by the monitor; see the performance block in /api/live/{stop_id}",
             "live": {
                 "detector_target_fps": 5.0,
+                "segmentation_model": "yolov8n-seg",
                 "segmentation": (
-                    "SAM 3 runs continuously in its own loop. One 1008x1008 forward pass takes "
-                    "roughly 14 s on this machine's CPU and the model only accepts 1008x1008 "
-                    "input, so segmentation cannot run at frame rate."
+                    "Masks and boxes come from one YOLO segmentation forward pass, roughly "
+                    "40 ms per frame on CPU, so masks refresh with the counts. SAM 3 is "
+                    "available as an optional deep pass but needs about 14 s per frame on "
+                    "this CPU and accepts only 1008x1008 input, so it cannot run per frame."
                 ),
+                "model_comparison_ms_per_frame": {
+                    "yolov8n-seg": 39,
+                    "yolo11n-seg": 112,
+                    "yolov8s-seg": 237,
+                    "sam3_1008px": 14000,
+                },
             },
             "limitations": [
                 "Clip footage is public reference material from other cities, not RTL cameras.",
@@ -273,7 +293,16 @@ class ReasonRequest(BaseModel):
 class MonitorRequest(BaseModel):
     stop_id: str
     fps: float = Field(5.0, ge=0.5, le=25.0, description="detection samples per second")
-    segmentation: bool = Field(True, description="also run the SAM 3 segmentation loop")
+    segmentation: bool = Field(True, description="per-frame masks from the segmentation model")
+    deep_pass_interval_s: float = Field(
+        0.0,
+        ge=0.0,
+        le=600.0,
+        description=(
+            "seconds between optional SAM 3 deep passes. 0 disables it. SAM 3 needs "
+            "roughly 14 s per frame on CPU, so this is for comparison, not monitoring."
+        ),
+    )
 
 
 @app.get("/api/live/{stop_id}")
@@ -324,19 +353,22 @@ def live_start(req: MonitorRequest) -> Dict[str, Any]:
         if other != req.stop_id:
             monitor_hub.stop(other)
 
+    segmenter = monitor_hub.segmenter() if req.segmentation else None
     monitor = monitor_hub.start(
         stop_id=req.stop_id,
         clip_path=clip,
         zone_mask=ZONE_MASKS.get(req.stop_id),
         fps=req.fps,
         with_segmentation=req.segmentation,
+        deep_pass_interval_s=req.deep_pass_interval_s,
     )
     return {
         "status": "started",
         "stop_id": req.stop_id,
         "fps": req.fps,
-        "segmentation": req.segmentation and monitor_hub.sam3() is not None,
-        "sam3_available": monitor_hub.sam3() is not None,
+        "segmentation_model": getattr(segmenter, "name", None),
+        "segmentation": segmenter is not None,
+        "deep_pass": req.deep_pass_interval_s > 0,
         "zone_calibrated": req.stop_id in ZONE_MASKS,
     }
 

@@ -31,3 +31,7 @@ data/footage/*.webm
 # Generated analysis (data/analysis/) and rendered keyframes (output/keyframes/) ARE
 # committed on purpose: they are measured evidence, and the dashboard is meaningless
 # without them. Regenerate with: python3 scripts/analyze_footage.py
+
+# Segmentation weights (download-on-first-use, AGPL-3.0 - see THIRD_PARTY.md)
+*-seg.pt
+yolo11*.pt

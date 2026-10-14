@@ -28,7 +28,7 @@ fi
 
 if [ ! -f "data/analysis/index.json" ]; then
   echo "warning: data/analysis/index.json is missing, so no stop has a measured arrival rate."
-  echo "         generate it first:  $PYTHON scripts/analyze_footage.py --skip-sam3"
+  echo "         generate it first:  $PYTHON scripts/analyze_footage.py"
   echo "         the dashboard will start and report the data as unavailable."
   echo
 fi

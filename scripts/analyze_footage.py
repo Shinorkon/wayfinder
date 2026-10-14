@@ -124,7 +124,14 @@ def build_index(
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Wayfinder offline footage analysis")
-    ap.add_argument("--skip-sam3", action="store_true", help="skip SAM 3 segmentation renders")
+    ap.add_argument(
+        "--skip-segmentation", "--skip-sam3", action="store_true", dest="skip_segmentation",
+        help="skip the mask layer in the rendered keyframes",
+    )
+    ap.add_argument(
+        "--sam3-deep-pass", action="store_true",
+        help="render the mask layer with SAM 3 instead of YOLOv8-seg (much slower)",
+    )
     ap.add_argument("--only", default=None, help="only clips whose filename starts with this")
     ap.add_argument("--max-seconds", type=float, default=None, help="override analysis window")
     args = ap.parse_args()
@@ -144,11 +151,11 @@ def main() -> int:
         network = json.load(f)
 
     detector = PersonDetector()
-    sam3 = None
-    if not args.skip_sam3:
-        from src.cv.sam3_masker import SAM3Masker
+    segmenter = None
+    if not args.skip_segmentation:
+        from src.cv.segmenter import load_segmenter
 
-        sam3 = SAM3Masker.get_instance()
+        segmenter = load_segmenter("sam3" if args.sam3_deep_pass else None)
 
     clip_artifacts: Dict[str, Dict[str, Any]] = {}
     keyframes: Dict[str, Dict[str, Any]] = {}
@@ -180,7 +187,7 @@ def main() -> int:
             clip_path,
             os.path.join(KEYFRAME_DIR, os.path.splitext(name)[0]),
             detector,
-            sam3=sam3,
+            sam3=segmenter,
             analysis=art,
             source_meta=sources["clips"],
         )

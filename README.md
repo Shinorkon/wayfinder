@@ -18,10 +18,38 @@ The perception stack runs offline over each clip in `data/footage/`:
 
 | Stage | Module | What it produces |
 |---|---|---|
-| Per-frame detection | `src/cv/detector.py` | YOLOv8n person boxes for a single frame |
+| Per-frame detection + masks | `src/cv/segmenter.py` | YOLOv8n-seg person boxes **and** one mask per person, from a single forward pass |
 | Temporal association | `src/cv/tracker.py` | Track identity across frames (IoU + constant-velocity, scipy Hungarian assignment) |
 | Waiting-zone derivation | `src/cv/stop_analysis.py` | The region where tracked people loiter (dwell-density heatmap) |
 | Measurement | `src/cv/stop_analysis.py` | Arrival rate (pax/min), standing queue, dwell time, time series |
+
+### Why the live path uses a YOLO segmentation model, not SAM 3
+
+Measured on this machine's CPU (540p frames, `imgsz=640`, person class only):
+
+| Model | ms/frame | Effective fps | Weights |
+|---|---|---|---|
+| **yolov8n-seg** (used) | **39** | **25.5** | 6.7 MB |
+| yolo11n-seg | 112 | 8.9 | 5.9 MB |
+| yolov8s-seg | 237 | 4.2 | 22.8 MB |
+| SAM 3 (1008×1008) | ~14 000 | 0.07 | 3.4 GB |
+
+SAM 3 is the stronger model, but it needs roughly 14 seconds per frame here, accepts only
+1008×1008 input, and therefore can never drive a live view. A YOLO segmentation network
+returns the boxes *and* the masks in the same forward pass, which is exactly what this
+application needs — and in side-by-side comparison its masks are tighter on people
+(SAM 3 bleeds onto bus windows and handrails at the same clip).
+
+There is a measurement consequence worth stating: because yolov8n-seg does not detect
+people seen through bus windows or glass, it reports *fewer* waiting passengers than the
+boxes-only model on the same clip (24.3 vs 40.5 pax/min on clip 01). Both verdicts are
+identical — low confidence, schedule held — but the segmentation model's numbers are the
+more conservative ones, which is the right direction for a dispatch decision.
+
+SAM 3 remains available as an optional slow "deep pass"
+(`POST /api/live/start` with `deep_pass_interval_s > 0`, or
+`scripts/analyze_footage.py --sam3-deep-pass` for keyframes) because it genuinely
+segments ambiguous objects better. It is simply not the default.
 
 Arrival rate is counted as **distinct tracks that entered the derived waiting zone and then
 remained stationary long enough to be considered waiting**. It is not a per-frame head count,
@@ -105,11 +133,12 @@ wayfinder/
 │   └── routes/                  # Greater Malé network, OSM road geometry, fleet config
 ├── src/
 │   ├── cv/
-│   │   ├── detector.py          # YOLOv8n per-frame person detection
+│   │   ├── segmenter.py         # YOLOv8n-seg: boxes + masks in one pass (live path)
+│   │   ├── detector.py          # YOLOv8n boxes-only path
 │   │   ├── tracker.py           # IoU + constant-velocity multi-object tracker
 │   │   ├── stop_analysis.py     # measurement: arrival rate, queue, dwell, confidence
 │   │   ├── keyframes.py         # raw / detections / segmentation / hybrid renders
-│   │   └── sam3_masker.py       # optional SAM 3 segmentation overlay
+│   │   └── sam3_masker.py       # optional SAM 3 deep pass (slow, off by default)
 │   ├── intelligence/
 │   │   ├── telemetry.py         # single source of truth for dashboard numbers
 │   │   ├── dispatch_engine.py   # the queueing model above
@@ -137,9 +166,9 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 1. Analyse the footage (writes data/analysis/ and output/keyframes/).
-python3 scripts/analyze_footage.py --skip-sam3     # fast path, no segmentation renders
-#    or, with SAM 3 overlays if you have the weights (~/.config/lightcraft/models/sam3):
-python3 scripts/analyze_footage.py
+python3 scripts/analyze_footage.py                  # ~15 s total, YOLOv8n-seg masks
+#    or, to render the mask layer with SAM 3 instead (about 40 s per clip):
+python3 scripts/analyze_footage.py --sam3-deep-pass
 
 # 2. Verify everything end to end.
 python3 -m pytest tests/ -q
@@ -152,12 +181,18 @@ python3 scripts/verify_pipeline.py
 `run.sh` sets its own directory and uses whatever `python3` is on your `PATH` inside the
 activated virtualenv. It does not hardcode anyone's home directory.
 
+### Live monitoring
+
+The dashboard streams a stop's camera through a single worker that runs the segmentation
+model on every sampled frame (default 5 fps) and feeds a tracker, so counts and masks come
+from the same pass and can never disagree. Measured on CPU: 80–140 ms per frame for 1080p
+input, holding 5 fps. One stop is monitored at a time — that is what this hardware supports,
+and the API says so rather than pretending otherwise.
+
 ### GPU note
 
-SAM 3 and YOLO run on CPU if CUDA is unavailable. On CPU the segmentation pass takes roughly
-16 seconds per image at 1008×1008, which is why keyframes are pre-rendered offline instead of
-computed on request. The code prints the device it selected; it does not claim GPU acceleration
-it is not using.
+Everything runs on CPU if CUDA is unavailable, and reports the device it actually used.
+No part of this project claims GPU acceleration it is not getting.
 
 ---
 

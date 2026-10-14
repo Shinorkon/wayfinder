@@ -1,6 +1,11 @@
 # Wayfinder runtime dependencies.
 # Versions are the ones this build was verified against (Python 3.14).
 # GPU: install the CUDA build of torch yourself; the code falls back to CPU and says so.
+#
+# Model weights are downloaded on first use by ultralytics (AGPL-3.0) and are NOT pip
+# packages: yolov8n.pt (boxes) and yolov8n-seg.pt (boxes + masks, the live path).
+# SAM 3 weights are optional and read from ~/.config/lightcraft/models/sam3 if present.
+# See THIRD_PARTY.md.
 
 fastapi==0.132.1
 uvicorn==0.41.0

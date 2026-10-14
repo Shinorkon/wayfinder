@@ -221,7 +221,7 @@ async function startMonitoring() {
     const result = await getJson(API.liveStart, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stop_id: state.stopId, fps: 5, segmentation: true }),
+      body: JSON.stringify({ stop_id: state.stopId, fps: 5, segmentation: true, deep_pass_interval_s: 0 }),
     });
     state.monitoring = true;
     if (!result.zone_calibrated) {
@@ -375,19 +375,19 @@ function renderFacts(live, payload) {
 
   if (live) {
     const seg = live.segmentation || {};
-    if (seg.enabled) {
-      if (seg.status === 'ok') {
-        const age = seg.last_run_at ? Math.round(Date.now() / 1000 - seg.last_run_at) : null;
-        add(`SAM 3: ${seg.masks} masks${age !== null ? `, ${age}s ago` : ''}`);
-        add(`SAM 3 pass takes ${num(seg.last_duration_s, 0)}s on ${seg.device || 'cpu'}`, 'warn');
-      } else {
-        add(`SAM 3: ${seg.status}`, 'warn');
-      }
-    } else {
-      add('SAM 3: not loaded', 'warn');
-    }
     const perf = live.performance || {};
-    add(`detection on ${perf.detector_device || 'cpu'} · ${num(perf.detector_ms_per_frame, 0)} ms/frame`);
+    if (seg.enabled && seg.status === 'ok') {
+      add(`${seg.model || 'segmentation'}: ${seg.masks} masks + ${seg.person_count ?? '–'} people, one pass`, 'good');
+    } else if (seg.enabled) {
+      add(`${seg.model || 'segmentation'}: ${seg.error || seg.status}`, 'warn');
+    } else {
+      add('segmentation: off', 'warn');
+    }
+    add(`boxes + masks on ${perf.detector_device || 'cpu'} · ${num(perf.detector_ms_per_frame, 0)} ms/frame`);
+    const deep = live.deep_pass || {};
+    if (deep.enabled) {
+      add(`SAM 3 deep pass every ${num(deep.interval_s, 0)}s (${num(deep.last_duration_s, 1)}s each)`, 'warn');
+    }
   }
 
   const source = payload.provenance?.clip_title;
@@ -423,7 +423,7 @@ function drawOverlay() {
   const px = (nx) => offsetX + nx * drawW;
   const py = (ny) => offsetY + ny * drawH;
 
-  // SAM 3 masks underneath the boxes.
+  // Person masks underneath the boxes (same forward pass as the boxes).
   const seg = live.segmentation || {};
   const overlay = seg.live_overlay;
   if (overlay?.masks?.length) {
@@ -533,7 +533,8 @@ function buildAbout() {
   h('How often each model runs');
   ul([
     'Detection: about 5 times a second, roughly 30-50 ms per frame on CPU (the live badge shows the rate actually achieved).',
-    'SAM 3 segmentation: continuously, but one pass takes several seconds on CPU, so the masks you see are a few seconds old and refresh in the background.',
+    'Masks: a YOLO segmentation model draws one mask per person in the same forward pass as the boxes, about 40 ms per frame on CPU.',
+    'SAM 3 is optional and much slower (about 14 seconds per frame here), so it is used only for one-off deep inspection, not for live monitoring.',
     'Headway advice: from the recorded analysis of this stop, not from the live counts, because a schedule decision needs minutes of data.',
   ]);
 

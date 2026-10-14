@@ -97,8 +97,9 @@ class StopMonitor:
         zone_mask: Optional[np.ndarray] = None,
         params: Optional[Dict[str, Any]] = None,
         fps: float = 5.0,
-        sam3=None,
-        sam3_interval_s: float = 4.0,
+        segmenter=None,
+        deep_pass_model=None,
+        deep_pass_interval_s: float = 0.0,
         loop_clip: bool = True,
     ):
         self.stop_id = stop_id
@@ -109,8 +110,12 @@ class StopMonitor:
         if params:
             self.params.update(params)
         self.target_fps = float(fps)
-        self.sam3 = sam3
-        self.sam3_interval_s = float(sam3_interval_s)
+        # A YOLO segmentation model produces boxes and masks in ONE forward pass, so the
+        # live view needs a single worker: no second slow loop, no box/mask desync.
+        self.segmenter = segmenter
+        # Optional slow model, run rarely, purely to compare against the fast one.
+        self.deep_pass_model = deep_pass_model
+        self.deep_pass_interval_s = float(deep_pass_interval_s)
         self.loop_clip = loop_clip
 
         self._lock = threading.Lock()
@@ -121,23 +126,34 @@ class StopMonitor:
         # Rolling arrival events (video seconds when a track first entered the zone).
         self._arrivals: Deque[float] = deque()
         self._seg_state: Dict[str, Any] = {
-            "enabled": sam3 is not None,
-            "status": "idle" if sam3 is not None else "disabled",
+            "enabled": segmenter is not None,
+            "status": "idle" if segmenter is not None else "disabled",
+            "model": getattr(segmenter, "name", None),
+            "device": getattr(segmenter, "device_label", None),
             "last_run_at": None,
             "last_duration_s": None,
             "runs": 0,
-            "interval_s": self.sam3_interval_s,
             "masks": None,
-            "presence_score": None,
-            "device": getattr(sam3, "device", None),
             "note": (
-                "SAM 3 segmentation runs continuously in its own loop; it cannot run at "
-                "frame rate because one 1008x1008 forward pass takes seconds on CPU."
-                if sam3 is not None
-                else "SAM 3 not loaded; enable with the segmentation layer."
+                "Masks are produced in the same forward pass as the detection boxes, so "
+                "they are as fresh as the box overlay."
+                if segmenter is not None
+                else "No segmentation model loaded; boxes only."
             ),
         }
-        self._seg_mask_overlay: Optional[Dict[str, Any]] = None
+        self._deep_state: Dict[str, Any] = {
+            "enabled": deep_pass_model is not None and self.deep_pass_interval_s > 0,
+            "model": getattr(deep_pass_model, "name", "sam3") if deep_pass_model else None,
+            "interval_s": self.deep_pass_interval_s,
+            "runs": 0,
+            "last_run_at": None,
+            "last_duration_s": None,
+            "note": (
+                "Slow deep pass kept for comparison only; it cannot run per frame."
+                if deep_pass_model is not None and self.deep_pass_interval_s > 0
+                else "Deep pass disabled."
+            ),
+        }
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -145,13 +161,13 @@ class StopMonitor:
         if self._threads:
             return
         self._stop.clear()
-        detector = threading.Thread(target=self._detect_loop, name=f"detect-{self.stop_id}", daemon=True)
-        detector.start()
-        self._threads.append(detector)
-        if self.sam3 is not None:
-            seg = threading.Thread(target=self._segment_loop, name=f"segment-{self.stop_id}", daemon=True)
-            seg.start()
-            self._threads.append(seg)
+        worker = threading.Thread(target=self._monitor_loop, name=f"monitor-{self.stop_id}", daemon=True)
+        worker.start()
+        self._threads.append(worker)
+        if self._deep_state["enabled"]:
+            deep = threading.Thread(target=self._deep_pass_loop, name=f"deep-{self.stop_id}", daemon=True)
+            deep.start()
+            self._threads.append(deep)
 
     def stop(self) -> None:
         self._stop.set()
@@ -198,6 +214,7 @@ class StopMonitor:
                 "waiting_zone": {"bounds_frac": snap.zone_bounds_frac},
                 "frame_size": list(snap.frame_size),
                 "segmentation": dict(self._seg_state, live_overlay=self._seg_mask_overlay),
+                "deep_pass": dict(self._deep_state),
                 "updated_at": snap.updated_at,
                 "age_s": round(time.time() - snap.updated_at, 2),
                 "warnings": snap.warnings,
@@ -205,7 +222,7 @@ class StopMonitor:
 
     # -- detection worker --------------------------------------------------
 
-    def _detect_loop(self) -> None:
+    def _monitor_loop(self) -> None:
         cap = cv2.VideoCapture(self.clip_path)
         if not cap.isOpened():
             with self._lock:
@@ -230,6 +247,7 @@ class StopMonitor:
         seen_ids: Dict[int, float] = {}   # track_id -> first zone-entry time (video seconds)
         frame_index = 0
         ema_ms = 0.0
+        ema_seg_ms = 0.0
         ema_fps = 0.0
         last_report = time.time()
         reports = 0
@@ -258,11 +276,25 @@ class StopMonitor:
 
             video_time = frame_index / fps
             t0 = time.time()
-            result = self.detector.detect_frame(frame)
-            detect_ms = (time.time() - t0) * 1000.0
+            if self.segmenter is not None:
+                # Segmentation model: boxes and masks from the same forward pass, so the
+                # masks the user sees belong to the exact frame the counts come from.
+                seg = self.segmenter.segment(frame)
+                detect_ms = seg.latency_ms
+                boxes = [
+                    (
+                        m["box"][0] * frame_w, m["box"][1] * frame_h,
+                        m["box"][2] * frame_w, m["box"][3] * frame_h,
+                    )
+                    for m in seg.masks if m.get("box")
+                ]
+            else:
+                result = self.detector.detect_frame(frame)
+                detect_ms = (time.time() - t0) * 1000.0
+                seg = None
+                boxes = [tuple(d["box"]) for d in result["detections"]]
             ema_ms = detect_ms if ema_ms == 0 else 0.85 * ema_ms + 0.15 * detect_ms
-
-            boxes = [tuple(d["box"]) for d in result["detections"]]
+            ema_seg_ms = detect_ms if ema_seg_ms == 0 else 0.8 * ema_seg_ms + 0.2 * detect_ms
             tracks = tracker.update(boxes, frame_index // sample_stride)
             records = assess_zone(
                 self.zone_mask, tracks, params,
@@ -294,6 +326,28 @@ class StopMonitor:
                 ema_fps = reports / elapsed
                 reports = 0
                 last_report = time.time()
+
+            if seg is not None:
+                with self._lock:
+                    self._seg_state.update(
+                        {
+                            "status": "ok" if not seg.error else "error",
+                            "error": seg.error,
+                            "last_run_at": time.time(),
+                            "last_duration_s": round(seg.latency_ms / 1000.0, 3),
+                            "runs": self._seg_state.get("runs", 0) + 1,
+                            "masks": len(seg.masks),
+                            "person_count": seg.person_count,
+                        }
+                    )
+                    self._seg_mask_overlay = {
+                        "frame_size": [frame_w, frame_h],
+                        "prompt": "person",
+                        "masks": [
+                            {"prompt": "person", "polygons": m["polygons"], "score": m.get("score")}
+                            for m in seg.masks
+                        ],
+                    }
 
             with self._lock:
                 self._snapshot = LiveSnapshot(
@@ -329,7 +383,7 @@ class StopMonitor:
 
     # -- segmentation worker ----------------------------------------------
 
-    def _segment_loop(self) -> None:
+    def _deep_pass_loop(self) -> None:
         cap = cv2.VideoCapture(self.clip_path)
         if not cap.isOpened():
             return
@@ -345,47 +399,33 @@ class StopMonitor:
                 cursor = 0
                 continue
 
-            with self._lock:
-                self._seg_state["status"] = "segmenting"
             started = time.time()
             try:
-                seg = self.sam3.segment_frame(
+                seg = self.deep_pass_model.segment_frame(
                     frame, text_prompts=["waiting passenger"], conf_threshold=0.45
                 )
-                overlay = self.sam3.mask_polygons(seg)
                 duration = time.time() - started
                 with self._lock:
-                    self._seg_state.update(
+                    self._deep_state.update(
                         {
                             "status": "ok",
                             "last_run_at": time.time(),
                             "last_duration_s": round(duration, 2),
-                            "runs": self._seg_state.get("runs", 0) + 1,
+                            "runs": self._deep_state.get("runs", 0) + 1,
                             "masks": seg.get("total_segments", 0),
-                            "presence_score": (
-                                seg["results"][0]["presence_score"] if seg.get("results") else None
-                            ),
-                            "used_low_confidence_fallback": seg.get(
-                                "used_low_confidence_fallback", False
-                            ),
                             "frame_time_s": round(cursor / fps, 2),
                         }
                     )
-                    self._seg_mask_overlay = {
-                        "frame_size": seg.get("image_size"),
-                        "prompt": seg["results"][0]["prompt"] if seg.get("results") else None,
-                        "masks": overlay,
-                    }
             except Exception as exc:  # keep monitoring even if one pass fails
                 with self._lock:
-                    self._seg_state.update(
+                    self._deep_state.update(
                         {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
                     )
                 duration = time.time() - started
 
             # Advance a few percent of the clip, then pause briefly.
             cursor = (cursor + max(1, int(0.05 * total))) % max(1, total)
-            self._stop.wait(self.sam3_interval_s)
+            self._stop.wait(self.deep_pass_interval_s)
 
         cap.release()
 
@@ -393,14 +433,17 @@ class StopMonitor:
 class MonitorHub:
     """Owns the monitors for every stop and guarantees only one runs at a time."""
 
-    def __init__(self, detector_factory, sam3_factory=None):
+    def __init__(self, detector_factory, segmenter_factory=None, deep_pass_factory=None):
         self.detector_factory = detector_factory
-        self.sam3_factory = sam3_factory
+        self.segmenter_factory = segmenter_factory
+        self.deep_pass_factory = deep_pass_factory
         self.monitors: Dict[str, StopMonitor] = {}
         self._lock = threading.Lock()
         self._detector = None
-        self._sam3 = None
-        self._sam3_attempted = False
+        self._segmenter = None
+        self._segmenter_attempted = False
+        self._deep_pass = None
+        self._deep_pass_attempted = False
 
     # Lazily created so the API can start without loading models.
     def detector(self):
@@ -409,17 +452,31 @@ class MonitorHub:
                 self._detector = self.detector_factory()
             return self._detector
 
-    def sam3(self):
+    def segmenter(self):
+        """The fast per-frame model (YOLO segmentation). Loaded on first use."""
         with self._lock:
-            if self._sam3 is None and not self._sam3_attempted:
-                self._sam3_attempted = True
-                if self.sam3_factory is not None:
+            if self._segmenter is None and not self._segmenter_attempted:
+                self._segmenter_attempted = True
+                if self.segmenter_factory is not None:
                     try:
-                        self._sam3 = self.sam3_factory()
+                        self._segmenter = self.segmenter_factory()
                     except Exception as exc:  # noqa: BLE001 - reported to the client
-                        print(f"[monitor] SAM 3 unavailable: {type(exc).__name__}: {exc}")
-                        self._sam3 = None
-            return self._sam3
+                        print(f"[monitor] segmentation unavailable: {type(exc).__name__}: {exc}")
+                        self._segmenter = None
+            return self._segmenter
+
+    def deep_pass(self):
+        """The slow optional model (SAM 3), only used when explicitly enabled."""
+        with self._lock:
+            if self._deep_pass is None and not self._deep_pass_attempted:
+                self._deep_pass_attempted = True
+                if self.deep_pass_factory is not None:
+                    try:
+                        self._deep_pass = self.deep_pass_factory()
+                    except Exception as exc:  # noqa: BLE001 - reported to the client
+                        print(f"[monitor] deep pass unavailable: {type(exc).__name__}: {exc}")
+                        self._deep_pass = None
+            return self._deep_pass
 
     def start(
         self,
@@ -428,12 +485,16 @@ class MonitorHub:
         zone_mask: Optional[np.ndarray],
         fps: float = 5.0,
         with_segmentation: bool = True,
+        deep_pass_interval_s: float = 0.0,
         params: Optional[Dict[str, Any]] = None,
     ) -> StopMonitor:
-        # Load models BEFORE taking the lock: detector()/sam3() acquire the same
+        # Load models BEFORE taking the lock: these accessors acquire the same
         # non-reentrant lock, so calling them while holding it deadlocks the request.
-        detector = self.detector()
-        sam3 = self.sam3() if with_segmentation else None
+        detector = None if with_segmentation else self.detector()
+        segmenter = self.segmenter() if with_segmentation else None
+        if with_segmentation and segmenter is None:
+            detector = self.detector()
+        deep = self.deep_pass() if deep_pass_interval_s > 0 else None
 
         with self._lock:
             current = self.monitors.get(stop_id)
@@ -446,7 +507,9 @@ class MonitorHub:
                 zone_mask=zone_mask,
                 params=params,
                 fps=fps,
-                sam3=sam3,
+                segmenter=segmenter,
+                deep_pass_model=deep,
+                deep_pass_interval_s=deep_pass_interval_s,
             )
             self.monitors[stop_id] = monitor
         monitor.start()

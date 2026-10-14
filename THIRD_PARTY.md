@@ -45,8 +45,18 @@ reports missing data instead of inventing it.
 
 | Component | Licence | Notes |
 |---|---|---|
-| YOLOv8n (`yolov8n.pt`) | AGPL-3.0 (Ultralytics) | Not committed to this repository. AGPL is a strong copyleft licence — review it before any commercial deployment. |
-| SAM 3 weights (`~/.config/lightcraft/models/sam3`) | Meta SAM 3 licence | Not committed. Referenced by path only; the pipeline runs without them if `--skip-sam3` is used. |
+| YOLOv8n (`yolov8n.pt`) | AGPL-3.0 (Ultralytics) | Download-on-first-use, not committed. AGPL is strong copyleft — review before commercial deployment. |
+| **YOLOv8n-seg (`yolov8n-seg.pt`)** | AGPL-3.0 (Ultralytics) | Download-on-first-use, not committed. This is the default detection **and** segmentation model for the live path. Same licence consideration as above. |
+| SAM 3 weights (`~/.config/lightcraft/models/sam3`) | Meta SAM 3 licence | Not committed. Optional: used only for the deep pass. The project runs fully without them. |
+
+## Model choices and their licences
+
+The live monitoring path uses **YOLOv8n-seg** (AGPL-3.0) because it produces boxes and masks
+in one forward pass at ~39 ms/frame on CPU, against ~14 s/frame for SAM 3. SAM 3 remains an
+optional deep pass. If AGPL-3.0 is unacceptable for your deployment, the detector and
+segmenter are swappable: `src/cv/segmenter.py` exposes a small interface
+(`segment(frame) -> LiveSegmentation`), and any permissively licensed segmentation model can
+be adapted to it. Note that Ultralytics models are the only AGPL dependency in the stack.
 
 ## Python dependencies
 
