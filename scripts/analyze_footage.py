@@ -130,7 +130,11 @@ def main() -> int:
     )
     ap.add_argument(
         "--sam3-deep-pass", action="store_true",
-        help="render the mask layer with SAM 3 instead of YOLOv8-seg (much slower)",
+        help="render the silhouette layer with SAM 3 instead (much slower)",
+    )
+    ap.add_argument(
+        "--with-masks", action="store_true",
+        help="also render silhouette outlines. Off by default: fills obscure the footage",
     )
     ap.add_argument(
         "--only", default=None,
@@ -159,6 +163,8 @@ def main() -> int:
         from src.cv.segmenter import load_segmenter
 
         segmenter = load_segmenter("sam3" if args.sam3_deep_pass else None)
+        if hasattr(segmenter, "with_masks"):
+            segmenter.with_masks = bool(args.with_masks)
 
     clip_artifacts: Dict[str, Dict[str, Any]] = {}
     keyframes: Dict[str, Dict[str, Any]] = {}

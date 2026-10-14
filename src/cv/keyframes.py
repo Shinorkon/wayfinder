@@ -164,7 +164,10 @@ def render_keyframes(
     outputs["detections"] = p
 
     sam_meta: Dict[str, Any] = {"available": False}
-    if sam3 is not None:
+    # ``sam3`` is whichever optional segmentation model was supplied. Masks are only
+    # rendered when that model actually produces polygons: a filled silhouette over every
+    # person hides the footage and adds nothing the boxes do not already show.
+    if sam3 is not None and getattr(sam3, "with_masks", True):
         seg = sam3.segment_frame(frame, text_prompts=["waiting passenger"], conf_threshold=0.45)
         sam = sam3.render_overlay(frame, seg)
         sam = draw_waiting_zone(sam, bounds)

@@ -18,7 +18,7 @@ The perception stack runs offline over each clip in `data/footage/`:
 
 | Stage | Module | What it produces |
 |---|---|---|
-| Per-frame detection + masks | `src/cv/segmenter.py` | YOLOv8n-seg person boxes **and** one mask per person, from a single forward pass |
+| Per-frame person detection | `src/cv/segmenter.py` | Bounding boxes per person — the output everything downstream uses. Silhouettes are opt-in and off by default. |
 | Temporal association | `src/cv/tracker.py` | Track identity across frames (IoU + constant-velocity, scipy Hungarian assignment) |
 | Waiting-zone derivation | `src/cv/stop_analysis.py` | The region where tracked people loiter (dwell-density heatmap) |
 | Measurement | `src/cv/stop_analysis.py` | Arrival rate (pax/min), standing queue, dwell time, time series |
@@ -33,11 +33,11 @@ Model size is chosen from **free VRAM**, not guessed:
 
 | Free VRAM | Model | Parameters |
 |---|---|---|
-| ≥ 10 GB | yolo11l-seg | 27.7M |
-| ≥ 6 GB | yolo11m-seg | 22.4M |
-| ≥ 3 GB | yolo11s-seg | 10.1M |
-| any CUDA | yolov8s-seg | 11.8M |
-| CPU | yolov8n-seg | 3.4M |
+| ≥ 10 GB | yolo11l | 27.7M |
+| ≥ 6 GB | yolo11m | 22.4M |
+| ≥ 3 GB | yolo11s | 10.1M |
+| any CUDA | yolov8s | 11.8M |
+| CPU | yolov8n | 3.4M |
 
 Every model in that ladder is tens of millions of parameters, so GPU memory is never the
 real constraint on a modern card — latency is. A fallback ladder loads the next size down
@@ -59,7 +59,23 @@ reason: "an NVIDIA GPU is present and the driver is loaded, but no /dev/nvidia* 
  CAP_MKNOD) and the same code will select the GPU automatically."
 ```
 
-### Why the live path uses a YOLO segmentation model, not SAM 3
+### Why detection, not segmentation
+
+A filled silhouette over every person covers the video it is supposed to be annotating. In
+practice several people's masks overlap, and the operator cannot see who is being tracked.
+Nothing downstream needs the silhouette either: the tracker, the waiting-zone test and the
+dashboard all work from boxes. So detection is the default, and it is faster:
+
+| Path | ms/frame (1080p, CPU) |
+|---|---|
+| **yolov8n detection (default)** | **34.4** |
+| yolov8n-seg with masks drawn | 40.0 |
+
+Silhouettes remain available per request (`masks: true` on `POST /api/live/start`, or
+`--with-masks` for keyframe rendering) and, when enabled, are drawn as outlines only — never
+fills.
+
+### Why the live path does not use SAM 3
 
 Measured on this machine's CPU (540p frames, `imgsz=640`, person class only):
 
@@ -71,10 +87,9 @@ Measured on this machine's CPU (540p frames, `imgsz=640`, person class only):
 | SAM 3 (1008×1008) | ~14 000 | 0.07 | 3.4 GB |
 
 SAM 3 is the stronger model, but it needs roughly 14 seconds per frame here, accepts only
-1008×1008 input, and therefore can never drive a live view. A YOLO segmentation network
-returns the boxes *and* the masks in the same forward pass, which is exactly what this
-application needs — and in side-by-side comparison its masks are tighter on people
-(SAM 3 bleeds onto bus windows and handrails at the same clip).
+1008×1008 input, and therefore can never drive a live view. A YOLO detector is what this
+application actually needs, and when silhouettes are requested its masks are tighter on
+people anyway (SAM 3 bleeds onto bus windows and handrails on the same clip).
 
 There is a measurement consequence worth stating: because yolov8n-seg does not detect
 people seen through bus windows or glass, it reports *fewer* waiting passengers than the
@@ -169,7 +184,7 @@ wayfinder/
 │   └── routes/                  # Greater Malé network, OSM road geometry, fleet config
 ├── src/
 │   ├── cv/
-│   │   ├── segmenter.py         # YOLOv8n-seg: boxes + masks in one pass (live path)
+│   │   ├── segmenter.py         # YOLOv8n person detection (live path); masks optional
 │   │   ├── detector.py          # YOLOv8n boxes-only path
 │   │   ├── tracker.py           # IoU + constant-velocity multi-object tracker
 │   │   ├── stop_analysis.py     # measurement: arrival rate, queue, dwell, confidence
@@ -202,9 +217,9 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 1. Analyse the footage (writes data/analysis/ and output/keyframes/).
-python3 scripts/analyze_footage.py                  # ~15 s total, YOLOv8n-seg masks
-#    or, to render the mask layer with SAM 3 instead (about 40 s per clip):
-python3 scripts/analyze_footage.py --sam3-deep-pass
+python3 scripts/analyze_footage.py                  # ~15 s total, box overlays
+#    or, to render a silhouette layer as well:
+python3 scripts/analyze_footage.py --with-masks
 
 # 2. Verify everything end to end.
 python3 -m pytest tests/ -q
@@ -220,8 +235,8 @@ activated virtualenv. It does not hardcode anyone's home directory.
 ### Live monitoring
 
 The dashboard streams a stop's camera through a single worker that runs the segmentation
-model on every sampled frame (default 5 fps) and feeds a tracker, so counts and masks come
-from the same pass and can never disagree. Measured on CPU: 80–140 ms per frame for 1080p
+detector on every sampled frame (default 5 fps) and feeds a tracker. Measured on CPU: 34 ms
+per frame for 1080p, holding 5 fps. Measured on CPU: 80–140 ms per frame for 1080p
 input, holding 5 fps. One stop is monitored at a time — that is what this hardware supports,
 and the API says so rather than pretending otherwise.
 

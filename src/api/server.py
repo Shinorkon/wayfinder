@@ -72,11 +72,11 @@ deepseek_agent = DeepSeekDispatchAgent()
 
 def _segmenter_factory():
     """
-    The fast per-frame model: a YOLO segmentation network.
+    The per-frame person detector.
 
-    Returns boxes and masks from one forward pass, which is what makes per-frame masks
-    affordable. load_segmenter() picks the weights from the detected device (free VRAM on
-    a GPU, smallest weights on CPU) and records why, so the UI can report it.
+    Detection only, by default: the tracker and the dashboard both work from boxes, and a
+    filled silhouette over every person hides the video. load_segmenter() picks weights
+    from the detected device (free VRAM on a GPU, smallest weights on CPU) and records why.
     """
     return load_segmenter()
 
@@ -316,7 +316,14 @@ class ReasonRequest(BaseModel):
 class MonitorRequest(BaseModel):
     stop_id: str
     fps: float = Field(5.0, ge=0.5, le=25.0, description="detection samples per second")
-    segmentation: bool = Field(True, description="per-frame masks from the segmentation model")
+    segmentation: bool = Field(True, description="per-frame person detection (boxes)")
+    masks: bool = Field(
+        False,
+        description=(
+            "also draw filled silhouettes per person. Off by default: a filled mask over "
+            "every person obscures the video underneath."
+        ),
+    )
     deep_pass_interval_s: float = Field(
         0.0,
         ge=0.0,
@@ -378,6 +385,9 @@ def live_start(req: MonitorRequest) -> Dict[str, Any]:
             monitor_hub.stop(other)
 
     segmenter = monitor_hub.segmenter() if req.segmentation else None
+    if segmenter is not None and hasattr(segmenter, "with_masks"):
+        # Silhouettes are opt-in per request; the default path draws boxes only.
+        segmenter.with_masks = bool(req.masks)
     monitor = monitor_hub.start(
         stop_id=req.stop_id,
         clip_path=clip,
@@ -391,6 +401,7 @@ def live_start(req: MonitorRequest) -> Dict[str, Any]:
         "stop_id": req.stop_id,
         "fps": req.fps,
         "segmentation_model": getattr(segmenter, "name", None),
+        "masks": bool(req.masks),
         "segmentation_device": getattr(segmenter, "device", None),
         "device_reason": getattr(segmenter, "device_note", None),
         "segmentation": segmenter is not None,

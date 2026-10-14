@@ -221,7 +221,7 @@ async function startMonitoring() {
     const result = await getJson(API.liveStart, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ stop_id: state.stopId, fps: 5, segmentation: true, deep_pass_interval_s: 0 }),
+      body: JSON.stringify({ stop_id: state.stopId, fps: 5, segmentation: true, masks: false, deep_pass_interval_s: 0 }),
     });
     state.monitoring = true;
     if (!result.zone_calibrated) {
@@ -377,13 +377,13 @@ function renderFacts(live, payload) {
     const seg = live.segmentation || {};
     const perf = live.performance || {};
     if (seg.enabled && seg.status === 'ok') {
-      add(`${seg.model || 'segmentation'}: ${seg.masks} masks + ${seg.person_count ?? '–'} people, one pass`, 'good');
+      add(`${seg.model || 'detector'}: ${seg.person_count ?? '–'} people tracked`, 'good');
     } else if (seg.enabled) {
-      add(`${seg.model || 'segmentation'}: ${seg.error || seg.status}`, 'warn');
+      add(`${seg.model || 'detector'}: ${seg.error || seg.status}`, 'warn');
     } else {
-      add('segmentation: off', 'warn');
+      add('detection: off', 'warn');
     }
-    add(`boxes + masks on ${perf.detector_device || 'cpu'} · ${num(perf.detector_ms_per_frame, 0)} ms/frame`);
+    add(`boxes on ${perf.detector_device || 'cpu'} · ${num(perf.detector_ms_per_frame, 0)} ms/frame`);
     const dev = payload.device || {};
     if (dev.cuda_available) {
       add(`${dev.gpu_name} · ${num(dev.free_vram_gb, 1)} GB free`, 'good');
@@ -430,11 +430,12 @@ function drawOverlay() {
   const py = (ny) => offsetY + ny * drawH;
 
   // Person masks underneath the boxes (same forward pass as the boxes).
+  // Silhouettes are only drawn when the server was asked for them. Even then they are
+  // outlines, never fills, so the picture underneath stays readable.
   const seg = live.segmentation || {};
   const overlay = seg.live_overlay;
   if (overlay?.masks?.length) {
-    ctx.fillStyle = 'rgba(214, 69, 139, 0.28)';
-    ctx.strokeStyle = 'rgba(255, 200, 255, 0.55)';
+    ctx.strokeStyle = 'rgba(255, 170, 240, 0.6)';
     ctx.lineWidth = 1;
     overlay.masks.forEach((mask) => {
       (mask.polygons || []).forEach((polygon) => {
@@ -447,7 +448,6 @@ function drawOverlay() {
           else ctx.lineTo(x, y);
         });
         ctx.closePath();
-        ctx.fill();
         ctx.stroke();
       });
     });
@@ -539,7 +539,8 @@ function buildAbout() {
   h('How often each model runs');
   ul([
     'Detection: about 5 times a second, roughly 30-50 ms per frame on CPU (the live badge shows the rate actually achieved).',
-    'Masks: a YOLO segmentation model draws one mask per person in the same forward pass as the boxes, about 40 ms per frame on CPU.',
+    'Boxes: one bounding box per person, about 34 ms per frame on CPU (the badge shows the rate actually achieved).',
+    'Silhouettes are off by default. A filled mask over every person covers the video, and nothing here needs the outline — the counts come from the boxes.',
     'SAM 3 is optional and much slower (about 14 seconds per frame here), so it is used only for one-off deep inspection, not for live monitoring.',
     'Headway advice: from the recorded analysis of this stop, not from the live counts, because a schedule decision needs minutes of data.',
   ]);

@@ -26,7 +26,7 @@ def segmenter():
 
 
 def test_loads_fast_model_and_names_itself(segmenter):
-    assert segmenter.name.startswith("yolov8n-seg")
+    assert segmenter.name.startswith("yolov8n")
     assert segmenter.is_sam3 is False
     assert segmenter.device_label in {"cpu", "cuda", "unknown"}
 
@@ -160,10 +160,37 @@ def test_all_ladder_models_are_small_enough_to_be_cheap():
     the premise of the ladder is that VRAM capacity is never the constraint.
     """
     ladder = {w for _m, w, _l in WEIGHT_TIERS} | {CPU_WEIGHTS}
-    assert "yolov8n-seg.pt" in ladder, "the CPU default must be in the ladder"
-    assert "yolo11l-seg.pt" in ladder, "the largest GPU tier must be in the ladder"
-    assert all(w.endswith("-seg.pt") for w in ladder)
+    assert CPU_WEIGHTS in ladder, "the CPU default must be in the ladder"
+    assert "yolo11l.pt" in ladder, "the largest GPU tier must be in the ladder"
+    assert all(w.endswith(".pt") for w in ladder)
+    assert not any(w.endswith("-seg.pt") for w in ladder), (
+        "the default ladder is detection-only; masks are opt-in"
+    )
     assert len(ladder) == len(WEIGHT_TIERS) + 1, "ladder must not repeat a model"
+
+
+def test_boxes_are_returned_without_masks():
+    """
+    The contract the tracker and dashboard depend on: boxes always, silhouettes only on
+    request. Filling every person with a mask made the video unreadable.
+    """
+    plain = YoloSegmenter(weights="yolov8n.pt", device="cpu", half=False)
+    assert plain.with_masks is False
+    result = plain.segment(np.zeros((480, 640, 3), dtype=np.uint8))
+    assert result.boxes == [] or all(len(b) == 4 for b in result.boxes)
+    assert result.masks == [], "no silhouettes should be produced by default"
+
+    with_masks = YoloSegmenter(weights="yolov8n-seg.pt", device="cpu", half=False, with_masks=True)
+    assert with_masks.with_masks is True
+    masked = with_masks.segment(np.zeros((480, 640, 3), dtype=np.uint8))
+    assert masked.masks == [] or masked.masks
+
+
+def test_mask_polygons_are_optional_in_the_payload():
+    result = LiveSegmentation(model="m", device="cpu", latency_ms=1.0, person_count=0)
+    payload = result.to_dict(100, 100)
+    assert payload["boxes"] == []
+    assert payload["masks"] == []
 
 
 def test_segmenter_honours_an_explicit_device():

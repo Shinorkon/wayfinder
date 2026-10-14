@@ -135,10 +135,11 @@ class StopMonitor:
             "runs": 0,
             "masks": None,
             "note": (
-                "Masks are produced in the same forward pass as the detection boxes, so "
-                "they are as fresh as the box overlay."
+                "Person detection supplies the boxes the tracker and the dashboard use. "
+                "Silhouettes are off by default because a filled mask over every person "
+                "hides the video."
                 if segmenter is not None
-                else "No segmentation model loaded; boxes only."
+                else "No detector loaded."
             ),
         }
         self._deep_state: Dict[str, Any] = {
@@ -281,12 +282,11 @@ class StopMonitor:
                 # masks the user sees belong to the exact frame the counts come from.
                 seg = self.segmenter.segment(frame)
                 detect_ms = seg.latency_ms
+                # Boxes are the detector's primary output; the tracker consumes them
+                # directly and never needs mask polygons.
                 boxes = [
-                    (
-                        m["box"][0] * frame_w, m["box"][1] * frame_h,
-                        m["box"][2] * frame_w, m["box"][3] * frame_h,
-                    )
-                    for m in seg.masks if m.get("box")
+                    (b[0] * frame_w, b[1] * frame_h, b[2] * frame_w, b[3] * frame_h)
+                    for b in seg.boxes
                 ]
             else:
                 result = self.detector.detect_frame(frame)
@@ -337,17 +337,25 @@ class StopMonitor:
                             "last_duration_s": round(seg.latency_ms / 1000.0, 3),
                             "runs": self._seg_state.get("runs", 0) + 1,
                             "masks": len(seg.masks),
+                            "boxes": len(seg.boxes),
                             "person_count": seg.person_count,
                         }
                     )
-                    self._seg_mask_overlay = {
-                        "frame_size": [frame_w, frame_h],
-                        "prompt": "person",
-                        "masks": [
-                            {"prompt": "person", "polygons": m["polygons"], "score": m.get("score")}
-                            for m in seg.masks
-                        ],
-                    }
+                    # Only publish polygons when the model actually produced them; the
+                    # dashboard draws boxes by default and never fakes a mask layer.
+                    self._seg_mask_overlay = (
+                        {
+                            "frame_size": [frame_w, frame_h],
+                            "prompt": "person",
+                            "masks": [
+                                {"prompt": "person", "polygons": m["polygons"], "score": m.get("score")}
+                                for m in seg.masks
+                                if m.get("polygons")
+                            ],
+                        }
+                        if seg.masks
+                        else None
+                    )
 
             with self._lock:
                 self._snapshot = LiveSnapshot(

@@ -40,6 +40,10 @@ class LiveSegmentation:
     device: str
     latency_ms: float
     person_count: int
+    # Normalised [x1, y1, x2, y2] per detected person. This is the primary output: the
+    # tracker and the dashboard both work from boxes.
+    boxes: List[List[float]] = field(default_factory=list)
+    # Optional silhouettes, only produced when explicitly requested.
     masks: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -49,10 +53,26 @@ class LiveSegmentation:
             "device": self.device,
             "latency_ms": round(self.latency_ms, 1),
             "person_count": self.person_count,
+            "boxes": self.boxes,
             "masks": self.masks,
             "error": self.error,
             "frame_size": [frame_w, frame_h],
         }
+
+
+def _normalise_box(
+    box: Optional[Sequence[float]], width: int, height: int
+) -> Optional[List[float]]:
+    """Converts a pixel box to normalised [x1, y1, x2, y2]."""
+    if not box:
+        return None
+    x1, y1, x2, y2 = (float(v) for v in box)
+    return [
+        round(x1 / width, 5),
+        round(y1 / height, 5),
+        round(x2 / width, 5),
+        round(y2 / height, 5),
+    ]
 
 
 def _polygons_from_mask(mask: np.ndarray, min_area_frac: float) -> List[List[List[float]]]:
@@ -88,10 +108,15 @@ class YoloSegmenter:
         imgsz: int = 640,
         device: Optional[str] = None,
         half: Optional[bool] = None,
+        with_masks: bool = False,
     ):
         from ultralytics import YOLO
 
         self.weights = weights
+        # Off by default. A filled mask over every person hides the video underneath,
+        # and nothing downstream needs the silhouette: the tracker, the waiting-zone test
+        # and the dashboard all work from boxes.
+        self.with_masks = with_masks
         self.conf_thresh = conf_thresh
         self.min_mask_area_frac = min_mask_area_frac
         self.imgsz = imgsz
@@ -154,7 +179,7 @@ class YoloSegmenter:
                 conf=self.conf_thresh,
                 imgsz=self.imgsz,
                 verbose=False,
-                retina_masks=True,
+                retina_masks=self.with_masks,
                 device=self.device,
                 quantize=self.quantize,
             )[0]
@@ -164,6 +189,7 @@ class YoloSegmenter:
                 device=self.device_label,
                 latency_ms=(time.time() - started) * 1000.0,
                 person_count=0,
+                boxes=[],
                 error=f"{type(exc).__name__}: {exc}",
             )
 
@@ -176,7 +202,7 @@ class YoloSegmenter:
         if boxes_t is not None and len(boxes_t) > 0:
             boxes = [tuple(float(v) for v in b) for b in boxes_t.xyxy.cpu().numpy()]
 
-        masks_t = getattr(result, "masks", None)
+        masks_t = getattr(result, "masks", None) if self.with_masks else None
         if masks_t is not None and getattr(masks_t, "data", None) is not None:
             raw = masks_t.data.cpu().numpy()
             for index, mask in enumerate(raw):
@@ -191,18 +217,19 @@ class YoloSegmenter:
                     {
                         "score": None,
                         "polygons": polygons,
-                        "box": [round(float(v) / (w if i % 2 == 0 else h), 5) for i, v in enumerate(box)]
-                        if box
-                        else None,
+                        "box": _normalise_box(box, w, h),
                     }
                 )
+
+        normalised = [b for b in (_normalise_box(b, w, h) for b in boxes) if b]
 
         return LiveSegmentation(
             model=self.name,
             device=self.device_label,
             latency_ms=latency,
             person_count=len(boxes),
-            masks=masks,
+            boxes=normalised,
+            masks=masks if self.with_masks else [],
         )
 
     def segment_frame(self, frame: np.ndarray, **_kwargs: Any) -> Dict[str, Any]:
@@ -282,12 +309,14 @@ class YoloSegmenter:
 # Timings are the CPU measurements from this repository, used only to pick a CPU default.
 WEIGHT_TIERS: List[Tuple[float, str, str]] = [
     # (minimum free VRAM in GB, weights, human description for the UI)
-    (10.0, "yolo11l-seg.pt", "yolo11l-seg (27.7M params)"),
-    (6.0, "yolo11m-seg.pt", "yolo11m-seg (22.4M params)"),
-    (3.0, "yolo11s-seg.pt", "yolo11s-seg (10.1M params)"),
-    (0.0, "yolov8s-seg.pt", "yolov8s-seg (11.8M params)"),
+    # Detection-only weights: the tracker and the dashboard need boxes, not masks, and
+    # boxes are several times cheaper to produce.
+    (10.0, "yolo11l.pt", "yolo11l (27.7M params)"),
+    (6.0, "yolo11m.pt", "yolo11m (22.4M params)"),
+    (3.0, "yolo11s.pt", "yolo11s (10.1M params)"),
+    (0.0, "yolov8s.pt", "yolov8s (11.8M params)"),
 ]
-CPU_WEIGHTS = "yolov8n-seg.pt"
+CPU_WEIGHTS = "yolov8n.pt"
 
 
 def device_report() -> Dict[str, Any]:

@@ -13,7 +13,7 @@
     "analysed_span_s": 35.0,
     "frames_analysed": 210,
     "sample_stride": 5,
-    "compute_seconds": 7.59,
+    "compute_seconds": 7.53,
     "parameters": {
       "conf_thresh": 0.3,
       "imgsz": 640,
